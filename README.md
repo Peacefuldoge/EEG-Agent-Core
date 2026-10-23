@@ -1,4 +1,4 @@
-# EEG-Agent Core · v0.3.0
+# EEG-Agent Core · v0.3.1
 
 UI-agnostic EEG scientific tools with **optional** LangGraph execution strategies: Plan-and-Execute, ReAct, ReWOO. This project does **not** install Chainlit, a chat CLI, vLLM, or model weights. It works with the user’s own Python and model setup.
 
@@ -11,6 +11,30 @@ uv pip install -e ".[agent]" --python "$CONDA_PREFIX/bin/python"   # also LangGr
 ```
 
 Use the vLLM server in your **other** `vllm` Conda environment; the Agent consumes `http://127.0.0.1:8000/v1` and doesn't install vLLM.
+
+## New: handcrafted features — differential entropy and relative EEG bandpower
+
+The `extract_features` tool exports a `(windows, channels, 34)` matrix with
+raw/band Gaussian differential entropy, delta/theta/alpha/beta/gamma absolute,
+relative and log bandpower, Hjorth, spectral entropy, peak frequency and
+standard temporal features. Relative powers use **1–45 Hz** as denominator.
+It preserves source window/subject/label metadata when available.
+
+```python
+from eeg_agent import EEGTools, extract_handcrafted_features
+
+tools = EEGTools('/mnt/d/EEG', './agent_runs')
+result = tools.invoke('extract_features', {
+    'source': '/mnt/d/EEG/processed/sub01_preprocessed.npz',
+    'max_windows': 128,
+})
+print(result['output_csv'], result['features_npz'])
+```
+
+For raw EDF/BDF, call `preprocess_eeg` first. For a NumPy tensor, call
+`extract_handcrafted_features(data, sfreq=250, data_unit='uV')` directly.
+See **[README_FEATURES.md](README_FEATURES.md)** for definitions, custom bands,
+DE units/methods, window-length caveats and full calling examples.
 
 ## Use EEG tools without a UI or LLM
 
@@ -46,7 +70,7 @@ For managed execution in an existing app, the stable adapter is also `EEGSession
 ## Compatibility and interfaces
 
 - Public: `EEGTools`, `EEGSession`, `STRATEGIES`, `SUPPORTED_RAW`, `build_agent`, `AgentGraphs`.
-- Tools: `inspect_eeg`, `preprocess_eeg`, `analyze_spectrum`, `analyze_connectivity`, `visualize_eeg`.
+- Tools: `inspect_eeg`, `preprocess_eeg`, `analyze_spectrum`, `analyze_connectivity`, `visualize_eeg`, `extract_features`.
 - If plotting isn't installed (`.[viz]` or `.[agent]`), use other tools; plotting needs Matplotlib.
 - Per-run logs and SQLite checkpoints are supported, but complete interactive pause/resume, token streaming and durable chat history are **not yet implemented**.
 - No uploaded EEG is transferred to an external API by this library; users choose their LLM client.

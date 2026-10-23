@@ -109,3 +109,33 @@ def test_step_budget_does_not_claim_success(simulated_graph,tools_and_file):
             'iterations':0,'replans':0,'steps':[],'evidence':{},'trace':[],'error':None})
     assert state['status']=='failed'
     assert 'budget' in state['error']
+
+class FakeFeatureModel(FakeModel):
+    def plan(self,state,tools,**kwargs):
+        return [
+            {'id':'E1','tool':'preprocess_eeg','args':{'source':'$input',
+                    'target_count':3,'window_seconds':1,'use_ica':False},'depends_on':[]},
+            {'id':'E2','tool':'extract_features','args':{'source':'$E1.output_npz'},
+                    'depends_on':['E1']},
+        ]
+    def react(self,messages,tool_schemas):
+        self.calls+=1
+        if self.calls<=2:
+            args=({'source':'$input','target_count':3,'window_seconds':1,'use_ica':False}
+                  if self.calls==1 else {'source':'$latest_npz'})
+            return AIMessage(tool_calls=[{'id':f'call{self.calls}',
+                'name':'preprocess_eeg' if self.calls==1 else 'extract_features','args':args}])
+        return AIMessage(content='Extracted verified handcrafted EEG features.')
+
+@pytest.mark.parametrize('strategy',['plan-execute','rewoo','react'])
+def test_feature_tool_runs_under_all_strategies(simulated_graph,tools_and_file,strategy):
+    tools,source=tools_and_file
+    graph=simulated_graph.AgentGraphs(FakeFeatureModel(),tools,max_steps=5).build(strategy)
+    state=graph.invoke({'task':'preprocess and extract handcrafted features','input_path':str(source),
+                       'cursor':0,'iterations':0,'replans':0,'steps':[],
+                       'evidence':{},'trace':[],'error':None,'status':'running'})
+    assert state['status']=='completed',state.get('error')
+    assert len(state['evidence'])==2
+    assert 'features_npz' in state['evidence']['E2']
+    assert Path(state['evidence']['E2']['features_npz']).is_file()
+    assert state['latest_npz']==state['evidence']['E1']['output_npz']

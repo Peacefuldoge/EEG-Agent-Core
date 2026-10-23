@@ -43,6 +43,18 @@ class SpectrumArgs(StrictModel):
     source: str = Field(description='Preprocessed NPZ path or $latest_npz')
     max_windows: int = Field(default=32, ge=1, le=128)
 
+class FeatureArgs(StrictModel):
+    source: str = Field(description='Preprocessed EEG NPZ path or $latest_npz')
+    max_windows: int = Field(default=32, ge=1, le=512)
+    # Legacy NPZ without data_unit are assumed to be uV; can explicitly override.
+    assume_unit: Literal['uV', 'V', 'mV'] = 'uV'
+    bands: dict[str, tuple[float, float]] | None = Field(
+        default=None, description='Optional named [low_hz, high_hz] EEG frequency bands')
+    total_band: tuple[float, float] = (1.0, 45.0)
+    band_de_method: Literal['filtered', 'psd'] = 'filtered'
+    welch_seconds: float = Field(default=2.0, gt=0, le=60)
+    filter_order: int = Field(default=4, ge=1, le=12)
+
 class ConnectivityArgs(StrictModel):
     source: str
     max_windows: int = Field(default=32, ge=1, le=128)
@@ -54,7 +66,7 @@ class VisualizeArgs(StrictModel):
 
 class Step(StrictModel):
     id: str = Field(pattern=r'^E[1-9][0-9]*$')
-    tool: Literal['inspect_eeg','preprocess_eeg','analyze_spectrum','analyze_connectivity','visualize_eeg']
+    tool: Literal['inspect_eeg','preprocess_eeg','analyze_spectrum','analyze_connectivity','visualize_eeg','extract_features']
     args: dict[str,Any]
     depends_on: list[str] = Field(default_factory=list)
 

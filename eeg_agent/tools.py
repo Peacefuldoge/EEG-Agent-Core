@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import csv
 import json
 import re
 import uuid
@@ -11,7 +12,7 @@ from typing import Callable
 import numpy as np
 
 from .schema import (StrictModel, InspectArgs, PreprocessArgs, SpectrumArgs,
-                     ConnectivityArgs, VisualizeArgs)
+                     ConnectivityArgs, VisualizeArgs, FeatureArgs)
 
 SUPPORTED_RAW = {'.edf','.bdf','.set','.vhdr','.fif','.cnt','.npy','.npz','.mat'}
 
@@ -36,6 +37,9 @@ class EEGTools:
             'preprocess_eeg': ToolSpec('preprocess_eeg','Preprocess continuous EEG, export windows and FC to new NPZ; never overwrite source.',PreprocessArgs,self.preprocess_eeg),
             'analyze_spectrum': ToolSpec('analyze_spectrum','Compute Welch PSD and aggregated EEG bandpower of processed NPZ.',SpectrumArgs,self.analyze_spectrum),
             'analyze_connectivity': ToolSpec('analyze_connectivity','Summarize Pearson channel connectivity of processed NPZ.',ConnectivityArgs,self.analyze_connectivity),
+            'extract_features': ToolSpec('extract_features',
+                'Extract handcrafted per-window/channel EEG features: Gaussian differential entropy (raw and per band), Welch absolute/relative/log bandpower, Hjorth parameters, spectral entropy, RMS, line length and more; export CSV/NPZ.',
+                FeatureArgs,self.extract_features),
             'visualize_eeg': ToolSpec('visualize_eeg','Save EEG time/frequency/FC figures and JSON summary of processed NPZ.',VisualizeArgs,self.visualize_eeg),
         }
 
@@ -147,6 +151,93 @@ class EEGTools:
                 'mean_absolute_pearson':float(np.mean(np.abs(mat[a,b]))) if len(a) else None,
                 'strongest_edges':[{'from':x,'to':y,'pearson_r':v} for _,x,y,v in edges],
                 'note':'Pearson correlation does not imply causation or clinical diagnosis'}
+
+    def extract_features(self, args: FeatureArgs):
+        """Produce inspectable, per-window/channel numerical features, not LLM guesses."""
+        src = self._resolve(args.source, suffix={'.npz'})
+        from .features import read_feature_npz, extract_handcrafted_features
+        samples, sfreq, channels, indices, unit, source_meta = read_feature_npz(
+            src, max_windows=args.max_windows, assume_unit=args.assume_unit,
+            return_metadata=True)
+        result = extract_handcrafted_features(
+            samples, sfreq, channels=channels, data_unit=unit,
+            bands=args.bands, total_band=args.total_band,
+            band_de_method=args.band_de_method,
+            welch_seconds=args.welch_seconds, filter_order=args.filter_order)
+
+        dest = self.output_root / 'features' / uuid.uuid4().hex
+        dest.mkdir(parents=True, exist_ok=False)
+        npz_path = dest / 'handcrafted_features.npz'
+        csv_path = dest / 'handcrafted_features.csv'
+        json_path = dest / 'feature_manifest.json'
+        np.savez_compressed(
+            npz_path, features=result.values,
+            feature_names=np.asarray(result.feature_names),
+            feature_units=np.asarray(result.feature_units),
+            channel_names=np.asarray(result.channels),
+            window_indices=indices, sfreq=np.asarray(sfreq), **source_meta)
+        with csv_path.open('w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['window_index', 'subject_id', 'dataset', 'label',
+                             'window_start_sec', 'window_end_sec', 'channel', *result.feature_names])
+            for w, ix in enumerate(indices):
+                get = lambda key: str(source_meta[key][w]) if key in source_meta else ''
+                times = source_meta['window_times_sec'][w] if 'window_times_sec' in source_meta else ('','')
+                for c, name in enumerate(result.channels):
+                    writer.writerow([int(ix), get('subject_ids'), get('dataset_names'),
+                                     get('labels'), *times, name, *[
+                        format(float(x), '.12g') if np.isfinite(x) else ''
+                        for x in result.values[w,c]]])
+
+        summary = {}
+        for i, name in enumerate(result.feature_names):
+            vals = result.values[...,i]
+            valid = vals[np.isfinite(vals)]
+            summary[name] = {
+                'mean': float(valid.mean()) if valid.size else None,
+                'std': float(valid.std()) if valid.size else None,
+                'invalid_count': int(vals.size - valid.size),
+            }
+        manifest = {
+            'source': str(src),
+            'n_windows_sampled': len(indices),
+            'window_indices': indices.tolist(),
+            'n_channels': len(channels),
+            'n_features': len(result.feature_names),
+            'shape': list(result.values.shape),
+            'sfreq': sfreq,
+            'amplitude_unit': 'uV',
+            'source_unit': unit,
+            'band_de_method': result.band_de_method,
+            'relative_power_denominator_hz': list(result.total_band),
+            'bands_hz': {k:list(v) for k,v in result.bands.items()},
+            'feature_names': result.feature_names,
+            'preserved_window_metadata_fields': list(source_meta),
+            'feature_units': dict(zip(result.feature_names, result.feature_units)),
+            'summary_by_feature': summary,
+            'notes': [
+                'Gaussian differential entropy uses 0.5*ln(2*pi*e*variance) in nats; amplitude reference is uV.',
+                'Relative bandpower is a fraction, not a percentage, of Welch PSD power in the denominator band.',
+                'Filtered DE uses per-window forward-backward Butterworth filtering; short-window edge effects apply.',
+                'Zero-variance channels yield missing (NaN) entropy instead of fabricated values.',
+                'These features are descriptive and not a clinical diagnosis.',
+            ],
+        }
+        json_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+        return {
+            'source': str(src),
+            'features_npz': str(npz_path),
+            'output_csv': str(csv_path),
+            'manifest_json': str(json_path),
+            'shape': manifest['shape'],
+            'n_windows_sampled': manifest['n_windows_sampled'],
+            'n_channels': manifest['n_channels'],
+            'n_features': manifest['n_features'],
+            'feature_names': manifest['feature_names'],
+            'relative_power_denominator_hz': manifest['relative_power_denominator_hz'],
+            'band_de_method': manifest['band_de_method'],
+            'summary_by_feature': summary,
+        }
 
     def visualize_eeg(self,args:VisualizeArgs):
         src=self._resolve(args.source,suffix={'.npz'})

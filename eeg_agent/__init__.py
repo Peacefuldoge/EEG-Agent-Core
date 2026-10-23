@@ -2,8 +2,8 @@
 
 EEGTools requires scientific dependencies; AgentGraphs is only loaded when used.
 """
-__version__ = "0.3.0"
-__all__ = ["EEGSession", "STRATEGIES", "EEGTools", "SUPPORTED_RAW", "AgentGraphs", "build_agent", "channel_config_path"]
+__version__ = "0.3.1"
+__all__ = ["EEGSession", "STRATEGIES", "EEGTools", "SUPPORTED_RAW", "AgentGraphs", "build_agent", "channel_config_path", "extract_handcrafted_features", "DEFAULT_BANDS", "FeatureMatrix"]
 
 
 def __getattr__(name):
@@ -13,6 +13,9 @@ def __getattr__(name):
     if name in {"EEGTools", "SUPPORTED_RAW"}:
         from . import tools
         return getattr(tools, name)
+    if name in {"extract_handcrafted_features", "DEFAULT_BANDS", "FeatureMatrix"}:
+        from . import features
+        return getattr(features, name)
     if name in {"AgentGraphs", "build_agent"}:
         from . import adapter
         return getattr(adapter, name)
