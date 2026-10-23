@@ -1,0 +1,58 @@
+{
+  "summary": {
+    "file": "examples/demo_npz/synthetic_MODMA.npz",
+    "dataset": "MODMA",
+    "subject": "synthetic-MODMA",
+    "windows_total": 13,
+    "windows_sampled": 12,
+    "channels": 16,
+    "samples_per_window": 188,
+    "window_seconds": 0.752,
+    "sampling_hz": 250.0,
+    "median_rms_uv": 3.4950532667526266,
+    "mean_p2p_uv": 11.535400507350763,
+    "mean_abs_fc": 0.07188026968364687,
+    "rejected_windows_reported": 0,
+    "unit": "uV"
+  },
+  "requested_plots": [
+    "traces",
+    "psd",
+    "spectrogram",
+    "bandpower",
+    "bandpower_map",
+    "fc_heatmap",
+    "fc_circle",
+    "fc_network",
+    "rms_time",
+    "channel_qc"
+  ],
+  "generated_figures": [
+    "traces.png",
+    "psd.png",
+    "spectrogram.png",
+    "bandpower.png",
+    "bandpower_map.png",
+    "fc_heatmap.png",
+    "fc_circle.png",
+    "fc_network.png",
+    "rms_time.png",
+    "channel_qc.png"
+  ],
+  "plot_errors": {},
+  "sampling_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
+  "note": "Descriptive QC only; selected windows, not clinical diagnosis."
+}

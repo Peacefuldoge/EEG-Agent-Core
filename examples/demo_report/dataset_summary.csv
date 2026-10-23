@@ -1,0 +1,5 @@
+﻿file,dataset,subject,windows_total,windows_sampled,channels,samples_per_window,window_seconds,sampling_hz,median_rms_uv,mean_p2p_uv,mean_abs_fc,rejected_windows_reported,unit
+examples/demo_npz/synthetic_HBN.npz,HBN,synthetic-HBN,6,6,12,375,1.5,250.0,3.3854283474259255,11.454642209741804,0.09090048650213789,0,uV
+examples/demo_npz/synthetic_MODMA.npz,MODMA,synthetic-MODMA,13,12,16,188,0.752,250.0,3.4950532667526266,11.535400507350763,0.07188026968364687,0,uV
+examples/demo_npz/synthetic_PRED_CT.npz,PRED_CT,synthetic-PRED_CT,10,10,8,250,1.0,250.0,3.3207859106834636,11.557601743936539,0.14284526057807462,0,uV
+examples/demo_npz/synthetic_TDBRAIN.npz,TDBRAIN,synthetic-TDBRAIN,5,5,6,500,2.0,250.0,3.236858438588179,11.89590113957723,0.1999897698561351,0,uV

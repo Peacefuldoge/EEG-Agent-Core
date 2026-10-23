@@ -1,0 +1,17 @@
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+*.pyc
+reports/
+preprocessed/
+visualizations/
+.env
+.venv/
+.venv-*/
+agent_runs/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.egg-info/
+dist/
+build/
