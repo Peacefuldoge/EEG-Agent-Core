@@ -1,3 +1,7 @@
+## v0.3.2 additions
+
+See **[README_RUNTIME.md](README_RUNTIME.md)** for streamed events, approvals, checkpoint recovery and Python API.
+
 # EEG-Agent Core · v0.3.1
 
 UI-agnostic EEG scientific tools with **optional** LangGraph execution strategies: Plan-and-Execute, ReAct, ReWOO. This project does **not** install Chainlit, a chat CLI, vLLM, or model weights. It works with the user’s own Python and model setup.

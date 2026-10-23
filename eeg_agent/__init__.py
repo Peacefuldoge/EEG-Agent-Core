@@ -2,11 +2,14 @@
 
 EEGTools requires scientific dependencies; AgentGraphs is only loaded when used.
 """
-__version__ = "0.3.1"
-__all__ = ["EEGSession", "STRATEGIES", "EEGTools", "SUPPORTED_RAW", "AgentGraphs", "build_agent", "channel_config_path", "extract_handcrafted_features", "DEFAULT_BANDS", "FeatureMatrix"]
+__version__ = "0.3.2"
+__all__ = ["EEGSession", "STRATEGIES", "EEGTools", "SUPPORTED_RAW", "AgentGraphs", "build_agent", "channel_config_path", "extract_handcrafted_features", "DEFAULT_BANDS", "FeatureMatrix", "SessionStore"]
 
 
 def __getattr__(name):
+    if name == "SessionStore":
+        from .persistence import SessionStore
+        return SessionStore
     if name in {"EEGSession", "STRATEGIES"}:
         from . import session
         return getattr(session, name)

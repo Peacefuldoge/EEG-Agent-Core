@@ -23,13 +23,34 @@ class WorkflowState(TypedDict,total=False):
     status:str
     final_answer:str
     messages:Annotated[list,add_messages]
+    tool_cursor:int
 
 class AgentGraphs:
-    def __init__(self, model, tools, *, max_steps:int=12, max_replans:int=1):
+    def __init__(self, model, tools, *, max_steps:int=12, max_replans:int=1, approval_tools=None):
         self.model=model
         self.tools=tools
         self.max_steps=max_steps
         self.max_replans=max_replans
+        self.approval_tools=frozenset(approval_tools or ())
+
+    def _approval(self, name, arguments, step_id=None):
+        """Pause before the first side effect. A resume restarts this node."""
+        if name not in self.approval_tools:
+            return True
+        from langgraph.types import interrupt
+        answer = interrupt({
+            'type': 'approval_required', 'tool': name, 'step_id': step_id,
+            'arguments': arguments, 'message': 'Approve this EEG analysis operation?'
+        })
+        return isinstance(answer, dict) and answer.get('approved') is True
+
+    @staticmethod
+    def _progress(tool, phase):
+        try:
+            from langgraph.config import get_stream_writer
+            get_stream_writer()({'kind': 'tool_progress', 'tool': tool, 'phase': phase})
+        except (ImportError, RuntimeError, LookupError):
+            pass
 
     def _summary(self,state):
         try:
@@ -51,12 +72,25 @@ class AgentGraphs:
                 return {'error':'Step budget exhausted','status':'failed'}
             step=Step.model_validate(s['steps'][s['cursor']])
             try:
+                args=bind_value(step.args,s)
+            except Exception as exc:
+                return {'status':'failed','error':f'{type(exc).__name__}: {exc}',
+                        'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'error','error':str(exc)}]}
+            # Do NOT catch LangGraph GraphInterrupt. It must reach the runtime
+            # so the checkpoint can be persisted and Command(resume=...) works.
+            if not self._approval(step.tool, args, step.id):
+                return {'status':'rejected','error':'User denied '+step.tool,
+                        'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'rejected'}]}
+            try:
+                self._progress(step.tool,'started')
                 result=execute_step(step,s,self.tools)
+                self._progress(step.tool,'completed')
             except Exception as exc:
                 result={'error':f'{type(exc).__name__}: {exc}',
                         'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'error','error':str(exc)}]}
             return {**result,'cursor':s['cursor']+1,'iterations':s.get('iterations',0)+1}
         def route_plan(s):
+            if s.get('status')=='rejected':return 'finish'
             if s.get('error'):
                 return 'summary' if s.get('replans',0)>=self.max_replans or s.get('iterations',0)>=self.max_steps else 'replan'
             return 'execute' if s.get('cursor',0)<len(s.get('steps',[])) and s.get('iterations',0)<self.max_steps else 'finish'
@@ -65,7 +99,7 @@ class AgentGraphs:
         def finish(s):
             unfinished=s.get('cursor',0)<len(s.get('steps',[]))
             error=s.get('error') or ('Step budget exhausted before plan completion' if unfinished else None)
-            return {'status':'failed' if error else 'completed','error':error}
+            return {'status':'rejected' if s.get('status')=='rejected' else ('failed' if error else 'completed'),'error':error}
         g.add_node('plan',plan);g.add_node('execute',execute);g.add_node('replan',replan)
         g.add_node('finish',finish);g.add_node('summary',self._summary)
         g.add_edge(START,'plan')
@@ -88,7 +122,19 @@ class AgentGraphs:
                 return {'status':'failed','error':'Step budget exhausted'}
             step=Step.model_validate(s['steps'][s['cursor']])
             try:
+                args=bind_value(step.args,s)
+            except Exception as exc:
+                return {'status':'failed','error':f'{type(exc).__name__}: {exc}',
+                        'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'error','error':str(exc)}]}
+            # Do NOT catch LangGraph GraphInterrupt. It must reach the runtime
+            # so the checkpoint can be persisted and Command(resume=...) works.
+            if not self._approval(step.tool, args, step.id):
+                return {'status':'rejected','error':'User denied '+step.tool,
+                        'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'rejected'}]}
+            try:
+                self._progress(step.tool,'started')
                 result=execute_step(step,s,self.tools)
+                self._progress(step.tool,'completed')
             except Exception as exc:
                 result={'error':f'{type(exc).__name__}: {exc}',
                         'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'error','error':str(exc)}]}
@@ -96,7 +142,7 @@ class AgentGraphs:
         def solver(s):
             unfinished=s.get('cursor',0)<len(s.get('steps',[]))
             error=s.get('error') or ('Step budget exhausted before plan completion' if unfinished else None)
-            status='failed' if error else 'completed'
+            status='rejected' if s.get('status')=='rejected' else ('failed' if error else 'completed')
             return {'status':status,'error':error,**self._summary({**s,'status':status,'error':error})}
         g.add_node('planner',planner);g.add_node('worker',worker)
         g.add_node('solver',solver)
@@ -122,32 +168,58 @@ class AgentGraphs:
             except Exception as exc:
                 return {'status':'failed','error':f'LLM request failed: {exc}','messages':messages if not s.get('messages') else []}
             return {'messages':(messages if not s.get('messages') else [])+[response],
-                    'iterations':s.get('iterations',0)+1}
+                    'iterations':s.get('iterations',0)+1, 'tool_cursor':0}
         def route(s):
             if s.get('error'):return 'finish'
             last=s['messages'][-1]
             return 'tools' if getattr(last,'tool_calls',None) else 'finish'
         def apply_tools(s):
-            last=s['messages'][-1]
-            replies=[];evidence=dict(s.get('evidence',{}));trace=list(s.get('trace',[]))
+            # Exactly ONE tool per node execution. On checkpoint resume, no
+            # earlier side-effecting calls in the same multi-call batch repeat.
+            calls=[x for x in s['messages'] if isinstance(x,AIMessage) and getattr(x,'tool_calls',None)]
+            if not calls:
+                return {'error':'No pending tool calls','status':'failed'}
+            batch=calls[-1].tool_calls
+            index=s.get('tool_cursor',0)
+            if index >= len(batch):
+                return {'error':'Tool cursor out of range','status':'failed'}
+            call=batch[index]
+            name=call['name'];kwargs=call.get('args',{})
+            evidence=dict(s.get('evidence',{}));trace=list(s.get('trace',[]))
             latest=s.get('latest_npz')
-            for call in last.tool_calls:
-                name=call['name'];kwargs=call.get('args',{})
-                ctx={**s,'evidence':evidence,'latest_npz':latest}
-                try:
-                    if len(replies)>=3:
-                        raise ValueError('Max 3 parallel calls per model turn; request remaining in a later turn')
-                    args=bind_value(kwargs,ctx)
-                    result=self.tools.invoke(name,args)
-                    evidence[f'E{len(evidence)+1}']=result
-                    if 'output_npz' in result:latest=result['output_npz']
-                    trace.append({'tool':name,'status':'ok','result':result})
-                    text=str(result)
-                except Exception as exc:
-                    text=f'{type(exc).__name__}: {exc}'
-                    trace.append({'tool':name,'status':'error','error':text})
-                replies.append(ToolMessage(content=text[:10000],tool_call_id=call['id'],name=name))
-            return {'messages':replies,'trace':trace,'evidence':evidence,'latest_npz':latest}
+            ctx={**s,'evidence':evidence,'latest_npz':latest}
+            try:
+                if len(batch)>3:
+                    raise ValueError('Max 3 tool calls per model turn')
+                args=bind_value(kwargs,ctx)
+            except Exception as exc:
+                text=f'{type(exc).__name__}: {exc}'
+                trace.append({'tool':name,'status':'error','error':text})
+                return {'messages':[ToolMessage(content=text[:10000],tool_call_id=call['id'],name=name)],
+                        'trace':trace,'evidence':evidence,'latest_npz':latest,'tool_cursor':index+1}
+            # Approval is outside try/except: LangGraph uses an exception to pause.
+            if not self._approval(name,args,call['id']):
+                trace.append({'tool':name,'status':'rejected'})
+                return {'status':'rejected','error':'User denied '+name,'trace':trace,
+                        'tool_cursor':index+1}
+            try:
+                self._progress(name,'started')
+                result=self.tools.invoke(name,args)
+                self._progress(name,'completed')
+                evidence[f'E{len(evidence)+1}']=result
+                if 'output_npz' in result:latest=result['output_npz']
+                trace.append({'tool':name,'status':'ok','result':result})
+                text=str(result)
+            except Exception as exc:
+                text=f'{type(exc).__name__}: {exc}'
+                trace.append({'tool':name,'status':'error','error':text})
+            return {'messages':[ToolMessage(content=text[:10000],tool_call_id=call['id'],name=name)],
+                    'trace':trace,'evidence':evidence,'latest_npz':latest,'tool_cursor':index+1}
+        def route_tools(s):
+            if s.get('status')=='rejected' or s.get('error'):return 'finish'
+            last=next((x for x in reversed(s.get('messages',[]))
+                       if isinstance(x,AIMessage) and getattr(x,'tool_calls',None)),None)
+            return 'tools' if last and s.get('tool_cursor',0)<len(last.tool_calls) else 'reason'
         def finish(s):
             # Don't invoke another LLM if it already gave its final ReAct answer.
             answer=''
@@ -155,12 +227,12 @@ class AgentGraphs:
                 tail=s['messages'][-1]
                 if isinstance(tail,AIMessage) and not tail.tool_calls:
                     answer=str(tail.content)
-            return {'status':'failed' if s.get('error') else 'completed',
+            return {'status':'rejected' if s.get('status')=='rejected' else ('failed' if s.get('error') else 'completed'),
                     'final_answer':answer or (f"Stopped: {s.get('error')}" if s.get('error') else 'No final answer')}
         g.add_node('reason',reason);g.add_node('tools',apply_tools);g.add_node('finish',finish)
         g.add_edge(START,'reason')
         g.add_conditional_edges('reason',route,{'finish':'finish','tools':'tools'})
-        g.add_edge('tools','reason');g.add_edge('finish',END)
+        g.add_conditional_edges('tools',route_tools,{'reason':'reason','tools':'tools','finish':'finish'});g.add_edge('finish',END)
         return g.compile(checkpointer=checkpointer)
 
     def build(self,strategy:str,checkpointer=None):

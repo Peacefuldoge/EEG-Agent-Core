@@ -41,13 +41,13 @@ def test_repl_saves_independent_run_and_last_npz(monkeypatch,tmp_path):
     out.mkdir()
     np.savez(produced,data=np.zeros((1,3,100)),sfreq=np.array(100.))
     class FakeGraph:
-        def stream(self, initial, *, config, stream_mode):
-            assert stream_mode=='updates'
+        def stream(self, initial, *, config, stream_mode, durability):
+            assert 'updates' in stream_mode
             assert config['configurable']['thread_id']
             assert initial['input_path']==str(src.resolve())
-            yield {'plan': {'steps':[{'id':'E1'}]}}
-            yield {'execute': {'latest_npz':str(produced), 'trace':[{'tool':'inspect_eeg','status':'ok'}]}}
-            yield {'summary': {'final_answer':'Computed result', 'status':'completed'}}
+            yield ('updates', {'plan': {'steps':[{'id':'E1'}]}})
+            yield ('updates', {'execute': {'latest_npz':str(produced), 'trace':[{'tool':'inspect_eeg','status':'ok'}]}})
+            yield ('updates', {'summary': {'final_answer':'Computed result', 'status':'completed'}})
     class FakeAgentGraphs:
         def __init__(self, *args, **kwargs):pass
         def build(self,*args):return FakeGraph()
