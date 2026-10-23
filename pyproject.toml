@@ -3,32 +3,35 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "eeg-agent-local"
-version = "0.2.0"
-description = "Local Qwen/vLLM EEG analysis agent with three LangGraph strategies"
+name = "eeg-agent-core"
+version = "0.3.0"
+description = "Reusable EEG scientific tools and optional LangGraph ReAct, Plan-Execute, ReWOO adapters; no UI or vLLM dependency"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-  "numpy>=1.24", "scipy>=1.11", "pandas>=2.0", "mne>=1.6",
-  "scikit-learn>=1.3", "matplotlib>=3.8", "tqdm>=4.65",
-  "pydantic>=2.9,<3"
+    "numpy>=1.24", "scipy>=1.11", "pandas>=2.0", "mne>=1.6",
+    "scikit-learn>=1.3", "pydantic>=2.9,<3"
 ]
 
 [project.optional-dependencies]
-agent = [
-  "langgraph>=1.0,<2", "langgraph-checkpoint-sqlite>=3.0,<5",
-  "langchain-openai>=1.0,<2", "langchain-core>=1.0,<2", "openai>=2.0,<3"
+viz = ["matplotlib>=3.8"]
+langgraph = [
+    "langgraph>=1.0,<2", "langgraph-checkpoint-sqlite>=3.0,<5",
+    "langchain-openai>=1.0,<2", "langchain-core>=1.0,<2", "openai>=2.0,<3"
 ]
-ui = ["chainlit>=2.0", "rich>=13.7", "prompt-toolkit>=3.0"]
-dev = ["pytest>=8", "notebook>=7", "nbformat>=5"]
-
-[project.scripts]
-eeg-agent = "eeg_agent.cli:main"
-eeg-agent-chat = "eeg_agent.chat_cli:main"
+agent = [
+    "langgraph>=1.0,<2", "langgraph-checkpoint-sqlite>=3.0,<5",
+    "langchain-openai>=1.0,<2", "langchain-core>=1.0,<2", "openai>=2.0,<3",
+    "matplotlib>=3.8"
+]
+dev = ["pytest>=8", "matplotlib>=3.8", "nbformat>=5"]
 
 [tool.setuptools]
 py-modules = ["eeg_universal", "eeg_visualization", "channel_layout"]
+
+[tool.setuptools.package-data]
+"eeg_agent" = ["resources/*.json"]
 
 [tool.setuptools.packages.find]
 include = ["eeg_agent*"]

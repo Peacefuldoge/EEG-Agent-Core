@@ -20,7 +20,7 @@ class EEGSession:
     def __init__(self, *, data_root: str | Path, output_root: str | Path,
                  model: str = 'qwen3-8b', base_url: str = 'http://127.0.0.1:8000/v1',
                  strategy: str = 'react', max_steps: int = 12,
-                 max_replans: int = 1, checkpoint: bool = True):
+                 max_replans: int = 1, checkpoint: bool = True, llm=None):
         from .tools import EEGTools
         if strategy not in STRATEGIES:
             raise ValueError('Invalid strategy: ' + strategy)
@@ -34,12 +34,19 @@ class EEGSession:
         self.current_file: str | None = None
         self.history: list[tuple[str, str]] = []
         self._model = None
+        self._injected_llm = llm  # optional existing LangChain chat model or full adapter
 
     @property
     def llm(self):
         if self._model is None:
             from .model import QwenModel
-            self._model = QwenModel(model=self.model_name, base_url=self.base_url)
+            if self._injected_llm is not None:
+                candidate = self._injected_llm
+                self._model = (candidate if all(callable(getattr(candidate, k, None))
+                                                 for k in ('plan', 'react', 'summarize'))
+                               else QwenModel(chat=candidate))
+            else:
+                self._model = QwenModel(model=self.model_name, base_url=self.base_url)
         return self._model
 
     def set_strategy(self, strategy: str):
@@ -51,6 +58,14 @@ class EEGSession:
         resolved = self.tools._resolve(str(path))
         self.current_file = str(resolved)
         return self.current_file
+
+    @property
+    def data_root(self) -> Path:
+        return self.tools.data_root
+
+    @property
+    def output_root(self) -> Path:
+        return self.tools.output_root
 
     def clear(self):
         self.history.clear()

@@ -1,46 +1,78 @@
-# EEG-Agent: Local LLM Agent for Reproducible EEG Analysis
+# EEG-Agent Core · v0.3.0
 
-An open-source-ready EEG automation project combining **LangGraph + locally served Qwen through vLLM** with three selectable execution strategies: **Plan-and-Execute, ReAct and ReWOO**.
+UI-agnostic EEG scientific tools with **optional** LangGraph execution strategies: Plan-and-Execute, ReAct, ReWOO. This project does **not** install Chainlit, a chat CLI, vLLM, or model weights. It works with the user’s own Python and model setup.
 
-**Start here:** [README_AGENT.md](README_AGENT.md) — model startup, install, commands, execution strategies, validation, and current limitations.
-
-**EEG library guide:** [README_EEG_TOOLKIT.md](README_EEG_TOOLKIT.md) — channel mapping, 1-second or arbitrary windows, old PRED+CT/HBN/MODMA/TDBRAIN adapters, 17 types of visualization, notebooks and data formats.
-
-## Architecture
-
-```text
-User task → LangGraph strategy (plan-execute | react | rewoo)
-                               ↓
-                   shared EEGTools registry
-                               ↓
-            eeg_universal + eeg_visualization
-                               ↓
-             NPZ / HTML figures / QC / traces
-```
-
-DeepSeek Harness migration is explicitly postponed to a second stage. It will use the same validated tool registry rather than duplicating algorithms.
-
-## Quick start
-
-1. Run `bash scripts/start_vllm.sh` in a CUDA/WSL2 environment with vLLM installed.
-2. In a separate Python environment: `pip install -e '.[agent,dev]'`.
-3. Verify the server: `python scripts/healthcheck.py`.
-4. Run the local agent:
+## Installation (Conda + uv, WSL2/Linux)
 
 ```bash
-python -m eeg_agent.cli \
-  --strategy plan-execute --data-root /data/eeg \
-  --input /data/eeg/sub-01.edf --output-root ./agent_runs \
-  --task "Preprocess to 26 channels and 1 second windows, analyze PSD/FC and generate plots."
+conda activate eeg_agent
+uv pip install -e . --python "$CONDA_PREFIX/bin/python"             # EEG tools only
+uv pip install -e ".[agent]" --python "$CONDA_PREFIX/bin/python"   # also LangGraph + plotting
 ```
 
-Run `python -m eeg_agent.cli --help` for all options. For locally sourced demonstration data, see `examples/` and tests.
+Use the vLLM server in your **other** `vllm` Conda environment; the Agent consumes `http://127.0.0.1:8000/v1` and doesn't install vLLM.
 
-> **Validation scope**: Core EEG tools and three graph-node control flows have been tested offline with synthetic data. Real LangGraph execution and GPU-hosted Qwen tool calling are not verified in the artifact-generation environment; test locally before using for research production.
+## Use EEG tools without a UI or LLM
 
-See [README_AGENT.md](README_AGENT.md) for security boundaries and limitations. Not a medical diagnostic system.
+```python
+from eeg_agent import EEGTools
 
+tools = EEGTools(data_root='/mnt/d/EEG', output_root='./agent_runs')
+print(tools.invoke('inspect_eeg', {'source': '/mnt/d/EEG/sub01.edf'}))
+```
 
-## Interactive CLI & Web UI
+## Plug into your existing LangGraph code (optional)
 
-See [README_UI.md](README_UI.md). First start your existing vLLM Qwen service, then use `eeg-agent-chat` or `chainlit run eeg_agent/web_app.py --host 127.0.0.1 --port 8002` from a separate `eeg_agent` Conda environment.
+```python
+from langchain_openai import ChatOpenAI
+from eeg_agent import EEGTools, build_agent
+
+model = ChatOpenAI(model='qwen3-8b', base_url='http://127.0.0.1:8000/v1',
+                   api_key='EMPTY', temperature=0)
+tools = EEGTools('/mnt/d/EEG', './agent_runs')
+graph = build_agent(strategy='rewoo', model=model, tools=tools)
+result = graph.invoke({
+    'task': 'Inspect EEG, calculate PSD, then describe results',
+    'input_path': '/mnt/d/EEG/sub01.edf',
+    'strategy': 'rewoo', 'cursor': 0, 'iterations': 0, 'replans': 0,
+    'steps': [], 'trace': [], 'evidence': {},
+    'latest_npz': None, 'error': None, 'status': 'running',
+}, config={'recursion_limit': 100})
+print(result.get('final_answer'))
+```
+
+For managed execution in an existing app, the stable adapter is also `EEGSession`, which accepts `llm=your_langchain_chat_model`, `strategy='react'`, and `checkpoint=True`. This remains the public integration contract for EEG-Agent-UI 0.3.x.
+
+## Compatibility and interfaces
+
+- Public: `EEGTools`, `EEGSession`, `STRATEGIES`, `SUPPORTED_RAW`, `build_agent`, `AgentGraphs`.
+- Tools: `inspect_eeg`, `preprocess_eeg`, `analyze_spectrum`, `analyze_connectivity`, `visualize_eeg`.
+- If plotting isn't installed (`.[viz]` or `.[agent]`), use other tools; plotting needs Matplotlib.
+- Per-run logs and SQLite checkpoints are supported, but complete interactive pause/resume, token streaming and durable chat history are **not yet implemented**.
+- No uploaded EEG is transferred to an external API by this library; users choose their LLM client.
+- The source tree retains original four-dataset preprocessing scripts and older notebooks for research traceability; they are not installed as import dependencies.
+
+## GUI and CLI (separate project)
+
+See `EEG-Agent-UI`: an optional package including Chainlit Web UI and terminal REPL. The core has **no import or install dependency** on this UI.
+
+## Tests
+
+```bash
+python -m pytest -q tests
+```
+
+Synthetic example inputs live under `examples/demo_npz/`. They are generated data, not clinical samples.
+
+## Benchmark all three strategies (no UI required)
+
+```bash
+python scripts/compare_strategies.py \
+  --data-root /mnt/d/EEG --input /mnt/d/EEG/sub01.edf \
+  --task 'Inspect, compute spectral power and explain results' \
+  --output-root ./benchmarks/local_runs
+```
+
+An already-running compatible LLM endpoint is needed. The optional `examples/start_vllm_example.sh` is a user-editable recipe, **not** an install dependency.
+
+Built-in 26/64 and HydroCel electrode layout JSONs are included in the installed Python package. Access with `from eeg_agent import channel_config_path; print(channel_config_path("standard_26"))`.
