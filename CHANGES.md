@@ -1,3 +1,11 @@
+## v0.2 — Interactive UIs
+
+- Added `eeg_agent/session.py`: shared Qwen conversation / LangGraph job execution context.
+- Added `eeg_agent/chat_cli.py`: Codex-style command REPL with `/file`, `/chat`, `/agent`, `/strategy`, history, progress node updates.
+- Added `eeg_agent/web_app.py`: local Chainlit chat, settings switch, limited upload, run steps and artifact downloads.
+- Added `README_UI.md`, scripts, and 3 offline session tests. 40 offline tests pass.
+- Changed default client model ID to `qwen3-8b` (matches `--served-model-name qwen3-8b`).
+
 # 相对 EEG_Preprocess_n 的修改记录
 
 - 保留旧版四数据集读取与标签处理逻辑，不直接改动原始标签数据。

@@ -1,3 +1,5 @@
+> **New in v0.2:** Interactive Chainlit Web UI and persistent REPL chat added. See [README_UI.md](README_UI.md). If the vLLM server was started with `--served-model-name qwen3-8b`, the client model ID must be `qwen3-8b`.
+
 # EEG-Agent — LangGraph + vLLM + local Qwen
 
 A local EEG research automation agent built **on top of the existing EEG_Preprocess_Universal science engine**. Three independent selectable strategies are implemented in `eeg_agent/strategies.py`:

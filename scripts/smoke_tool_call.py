@@ -5,7 +5,7 @@ from openai import OpenAI
 
 p=argparse.ArgumentParser()
 p.add_argument('--base-url',default='http://localhost:8000/v1')
-p.add_argument('--model',default='Qwen/Qwen3-8B')
+p.add_argument('--model',default='qwen3-8b')
 a=p.parse_args()
 c=OpenAI(base_url=a.base_url,api_key='EMPTY',timeout=120)
 answer=c.chat.completions.create(model=a.model,temperature=0,

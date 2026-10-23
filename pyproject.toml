@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eeg-agent-local"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local Qwen/vLLM EEG analysis agent with three LangGraph strategies"
 readme = "README.md"
 license = "MIT"
@@ -20,10 +20,12 @@ agent = [
   "langgraph>=1.0,<2", "langgraph-checkpoint-sqlite>=3.0,<5",
   "langchain-openai>=1.0,<2", "langchain-core>=1.0,<2", "openai>=2.0,<3"
 ]
+ui = ["chainlit>=2.0", "rich>=13.7", "prompt-toolkit>=3.0"]
 dev = ["pytest>=8", "notebook>=7", "nbformat>=5"]
 
 [project.scripts]
 eeg-agent = "eeg_agent.cli:main"
+eeg-agent-chat = "eeg_agent.chat_cli:main"
 
 [tool.setuptools]
 py-modules = ["eeg_universal", "eeg_visualization", "channel_layout"]

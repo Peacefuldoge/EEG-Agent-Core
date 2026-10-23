@@ -38,7 +38,7 @@ class QwenModel:
         if chat is None:
             from langchain_openai import ChatOpenAI
             self.chat=ChatOpenAI(
-                model=model or os.getenv('EEG_LLM_MODEL','Qwen/Qwen3-8B'),
+                model=model or os.getenv('EEG_LLM_MODEL','qwen3-8b'),
                 base_url=base_url or os.getenv('EEG_LLM_BASE_URL','http://localhost:8000/v1'),
                 api_key=api_key or os.getenv('EEG_LLM_API_KEY','EMPTY'),
                 temperature=0,max_retries=1,timeout=180,

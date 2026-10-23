@@ -39,3 +39,8 @@ Run `python -m eeg_agent.cli --help` for all options. For locally sourced demons
 > **Validation scope**: Core EEG tools and three graph-node control flows have been tested offline with synthetic data. Real LangGraph execution and GPU-hosted Qwen tool calling are not verified in the artifact-generation environment; test locally before using for research production.
 
 See [README_AGENT.md](README_AGENT.md) for security boundaries and limitations. Not a medical diagnostic system.
+
+
+## Interactive CLI & Web UI
+
+See [README_UI.md](README_UI.md). First start your existing vLLM Qwen service, then use `eeg-agent-chat` or `chainlit run eeg_agent/web_app.py --host 127.0.0.1 --port 8002` from a separate `eeg_agent` Conda environment.

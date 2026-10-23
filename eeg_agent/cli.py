@@ -15,7 +15,7 @@ def main(argv=None):
     p.add_argument('--input',type=Path,required=True,help='Input EEG file')
     p.add_argument('--data-root',type=Path,required=True,help='Allowlisted input directory')
     p.add_argument('--output-root',type=Path,default=Path('./agent_runs'))
-    p.add_argument('--model',default=os.getenv('EEG_LLM_MODEL','Qwen/Qwen3-8B'))
+    p.add_argument('--model',default=os.getenv('EEG_LLM_MODEL','qwen3-8b'))
     p.add_argument('--base-url',default=os.getenv('EEG_LLM_BASE_URL','http://localhost:8000/v1'))
     p.add_argument('--max-steps',type=int,default=12)
     p.add_argument('--max-replans',type=int,default=1)
