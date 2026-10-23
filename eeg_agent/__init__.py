@@ -2,11 +2,26 @@
 
 EEGTools requires scientific dependencies; AgentGraphs is only loaded when used.
 """
-__version__ = "0.3.2"
-__all__ = ["EEGSession", "STRATEGIES", "EEGTools", "SUPPORTED_RAW", "AgentGraphs", "build_agent", "channel_config_path", "extract_handcrafted_features", "DEFAULT_BANDS", "FeatureMatrix", "SessionStore"]
+__version__ = "0.4.1"
+__all__ = ["EEGSession", "STRATEGIES", "EEGTools", "SUPPORTED_RAW", "AgentGraphs", "build_agent", "channel_config_path", "extract_handcrafted_features", "DEFAULT_BANDS", "FeatureMatrix", "SessionStore", "compute_connectivity", "assess_windows", "review_preprocessing", "preprocess_dataset", "paired_quality_report", "validate_output_metadata", "output_metadata_schema_path"]
 
 
 def __getattr__(name):
+    if name in {"paired_quality_report", "validate_output_metadata"}:
+        from . import quality_reports
+        return getattr(quality_reports, name)
+    if name == "compute_connectivity":
+        from .connectivity import compute_connectivity
+        return compute_connectivity
+    if name == "assess_windows":
+        from .qc import assess_windows
+        return assess_windows
+    if name == "review_preprocessing":
+        from .science import review_preprocessing
+        return review_preprocessing
+    if name == "preprocess_dataset":
+        from .batch import preprocess_dataset
+        return preprocess_dataset
     if name == "SessionStore":
         from .persistence import SessionStore
         return SessionStore
@@ -37,3 +52,10 @@ def channel_config_path(name: str):
     if name not in allowed:
         raise ValueError(f"Unknown channel config: {name}")
     return Path(str(files(__name__).joinpath("resources", name + ".json")))
+
+
+def output_metadata_schema_path():
+    """Bundled JSON Schema for the versioned EEG-Agent recording sidecar."""
+    from importlib.resources import files
+    from pathlib import Path
+    return Path(str(files(__name__).joinpath("resources", "output_metadata.schema.json")))

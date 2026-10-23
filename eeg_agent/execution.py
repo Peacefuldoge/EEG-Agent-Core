@@ -59,9 +59,9 @@ def execute_step(step:Step, state:dict, tools:EEGTools) -> dict:
                       'arguments':args,'error':error})
         return {'evidence':evidence,'trace':trace,'error':error}
 
-def parse_plan(obj:dict) -> list[dict]:
+def parse_plan(obj:dict, allowed_tools=None) -> list[dict]:
     """Validate DAG ordering, type/schema, and unique IDs before touching any data."""
-    return [step.model_dump() for step in Plan.model_validate(obj).steps]
+    return [step.model_dump() for step in Plan.model_validate(obj,context={"allowed_tools":allowed_tools} if allowed_tools is not None else None).steps]
 
 def validate_tool_args(step:Step,tools:EEGTools,state:dict) -> None:
     """Validate arguments before executing, allowing model references to resolve."""

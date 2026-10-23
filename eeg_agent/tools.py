@@ -7,12 +7,15 @@ import csv
 import json
 import re
 import uuid
+import re
+from .science import review_preprocessing
+from .reproducibility import ArtifactCache, sha256_file, provenance, json_write_atomic, environment_info, source_bundle
 from typing import Callable
 
 import numpy as np
 
 from .schema import (StrictModel, InspectArgs, PreprocessArgs, SpectrumArgs,
-                     ConnectivityArgs, VisualizeArgs, FeatureArgs)
+                     ConnectivityArgs, VisualizeArgs, FeatureArgs, QcArgs, IntegrityArgs, BatchArgs, ProposalArgs, QualityReportArgs, MetadataArgs)
 
 SUPPORTED_RAW = {'.edf','.bdf','.set','.vhdr','.fif','.cnt','.npy','.npz','.mat'}
 
@@ -22,6 +25,7 @@ class ToolSpec:
     description: str
     args: type[StrictModel]
     callback: Callable
+    parallel_safe: bool=False
 
 class EEGTools:
     def __init__(self, data_root: str | Path, output_root: str | Path,
@@ -32,6 +36,8 @@ class EEGTools:
             raise ValueError(f'Data root directory is missing: {self.data_root}')
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.max_source_mb = max_source_mb
+        self.cache=ArtifactCache(self.output_root)
+        self._builtins=set()
         self.registry: dict[str,ToolSpec] = {
             'inspect_eeg': ToolSpec('inspect_eeg','Inspect EEG format, channels, sampling rate, duration and annotations.',InspectArgs,self.inspect_eeg),
             'preprocess_eeg': ToolSpec('preprocess_eeg','Preprocess continuous EEG, export windows and FC to new NPZ; never overwrite source.',PreprocessArgs,self.preprocess_eeg),
@@ -41,7 +47,37 @@ class EEGTools:
                 'Extract handcrafted per-window/channel EEG features: Gaussian differential entropy (raw and per band), Welch absolute/relative/log bandpower, Hjorth parameters, spectral entropy, RMS, line length and more; export CSV/NPZ.',
                 FeatureArgs,self.extract_features),
             'visualize_eeg': ToolSpec('visualize_eeg','Save EEG time/frequency/FC figures and JSON summary of processed NPZ.',VisualizeArgs,self.visualize_eeg),
+            'assess_eeg_quality': ToolSpec('assess_eeg_quality','Non-destructive EEG QC: flat channels, extreme amplitude, line noise and non-finite data.',QcArgs,self.assess_eeg_quality),
+            'propose_preprocessing': ToolSpec('propose_preprocessing','Propose scientifically cautious preprocessing parameters using QC; never mutate EEG.',ProposalArgs,self.propose_preprocessing),
+            'validate_eeg': ToolSpec('validate_eeg','Inspect file checksum, shape, channels, non-finite values and integrity.',IntegrityArgs,self.validate_eeg),
+            'batch_preprocess': ToolSpec('batch_preprocess','Dataset-level resumable per-file EEG preprocessing, content-cache and manifest.',BatchArgs,self.batch_preprocess),
+            'compare_eeg_quality': ToolSpec('compare_eeg_quality',
+                'Read paired before/after EEG preprocessing quality metrics for matching physical channels and time windows; exposes QC report files.',
+                QualityReportArgs,self.compare_eeg_quality),
+            'inspect_output_metadata': ToolSpec('inspect_output_metadata',
+                'Read and validate standardized EEG-Agent output metadata, channel/window shape, sampling, parameters and provenance.',
+                MetadataArgs,self.inspect_output_metadata),
         }
+        self._builtins=set(self.registry)
+        for name in ('inspect_eeg','assess_eeg_quality','validate_eeg','analyze_spectrum','compare_eeg_quality','inspect_output_metadata'):
+            self.registry[name].parallel_safe=True
+
+    def register_tool(self, name: str, description: str, args: type[StrictModel], callback: Callable, *, parallel_safe: bool=False):
+        """Register host-provided tools via strict Pydantic schemas, no execution of arbitrary code strings."""
+        if not isinstance(name,str) or re.fullmatch(r'[a-z][a-z0-9_]{0,63}',name) is None:
+            raise ValueError('Invalid tool name')
+        if name in self.registry:
+            raise ValueError('Tool already registered: '+name)
+        if not isinstance(args,type) or not issubclass(args,StrictModel):
+            raise TypeError('args must be a StrictModel subclass')
+        if not callable(callback) or not isinstance(description,str) or not description.strip():
+            raise TypeError('Tool requires a callable and description')
+        self.registry[name]=ToolSpec(name,description,args,callback,parallel_safe=parallel_safe)
+
+    def unregister_tool(self,name: str):
+        if name in self._builtins:
+            raise ValueError('Cannot unregister built-in scientific tools')
+        self.registry.pop(name)
 
     def _resolve(self, path: str, *, output_allowed=True, suffix=None) -> Path:
         p = Path(path).expanduser().resolve(strict=True)
@@ -94,6 +130,31 @@ class EEGTools:
             raw.close()
 
     def preprocess_eeg(self,args:PreprocessArgs):
+        source=self._resolve(args.source,suffix=SUPPORTED_RAW)
+        params=args.model_dump(exclude={'source','use_cache'})
+        review=review_preprocessing(params,input_sfreq=args.input_sfreq)
+        if review.errors:
+            raise ValueError('; '.join(review.errors))
+        # Input hash + scientific parameters + implementation version are part of the key.
+        def compute():
+            result=self._preprocess_uncached(args)
+            result['scientific_warnings']=list(review.warnings)
+            return result
+        extras=[self._resolve(args.events_tsv,output_allowed=False,suffix={'.tsv'})] if args.events_tsv else []
+        for item in source_bundle(source,data_root=self.data_root,extras=extras):
+            if item['size_bytes'] > self.max_source_mb*1024*1024:
+                raise ValueError('Input EEG companion exceeds source size limit')
+        if args.use_cache:
+            return self.cache.execute(source,params,'preprocess-v0.4.1',compute,
+                                      data_root=self.data_root,extras=extras)
+        result=compute()
+        artifact=Path(result['output_npz'])
+        manifest=artifact.with_suffix('.provenance.json')
+        json_write_atomic(manifest,provenance(source,params,algorithm='preprocess-v0.4.1',output=artifact,
+                                                   data_root=self.data_root,extras=extras))
+        return {**result,'cache_hit':False,'cache_key':None,'provenance_json':str(manifest)}
+
+    def _preprocess_uncached(self,args:PreprocessArgs):
         src = self._resolve(args.source,suffix=SUPPORTED_RAW)
         from eeg_universal import Settings, load_raw, preprocess_raw, load_blocks
         cfg = Settings(target_sfreq=args.target_sfreq, window_seconds=args.window_seconds,
@@ -110,6 +171,10 @@ class EEGTools:
                 event_path=self._resolve(args.events_tsv,output_allowed=False,suffix={'.tsv'}) if args.events_tsv else None
                 blocks=load_blocks(event_path,raw,cfg.default_label)
             arrays,meta = preprocess_raw(raw,cfg,event_blocks=blocks)
+            # Paired QC uses the original recording, never the already filtered
+            # signal; the retained output windows define matching time intervals.
+            from .quality_reports import paired_quality_report
+            qc_comparison = paired_quality_report(raw,arrays,meta)
         finally:
             raw.close()
         # A separate run directory ensures no collision and preserves originals.
@@ -122,10 +187,24 @@ class EEGTools:
         meta['source_file']=str(src)
         arrays['metadata_json']=np.asarray(json.dumps(meta,ensure_ascii=False,default=str))
         np.savez_compressed(dest,**arrays)
+        from .quality_reports import (write_quality_report, standardized_output_metadata,
+                                      validate_output_metadata)
+        qc_files=write_quality_report(qc_comparison,job_dir)
+        metadata_path=job_dir/'output_metadata.json'
+        std_meta=standardized_output_metadata(
+            source=src,output=dest,arrays=arrays,processing_meta=meta,
+            params=args.model_dump(exclude={'source','use_cache'}),
+            qc_report=qc_comparison,qc_paths=qc_files,data_root=self.data_root,
+            artifact_provenance=dest.with_suffix('.provenance.json'))
+        validate_output_metadata(std_meta,dest)
+        json_write_atomic(metadata_path,std_meta)
         return {'output_npz':str(dest),'shape':meta['shape'],'sfreq':cfg.target_sfreq,
                 'window_seconds':meta['effective_window_sec'], 'window_qc':meta['window_qc'],
                 'bad_channel_info':meta['bad_channel_info'],'ica':meta['ica'],
-                'virtual_interpolated_channels':meta['channel_info']['virtual_interpolated_channels']}
+                'virtual_interpolated_channels':meta['channel_info']['virtual_interpolated_channels'],
+                **qc_files,'qc_comparison_status':qc_comparison['status'],
+                'qc_paired_windows':qc_comparison['paired_windows'],
+                'output_metadata_json':str(metadata_path)}
 
     def analyze_spectrum(self,args:SpectrumArgs):
         src=self._resolve(args.source,suffix={'.npz'})
@@ -141,16 +220,158 @@ class EEGTools:
 
     def analyze_connectivity(self,args:ConnectivityArgs):
         src=self._resolve(args.source,suffix={'.npz'})
-        from eeg_visualization import read_npz,fc_matrix
+        from eeg_visualization import read_npz
+        from .connectivity import compute_connectivity, DEFAULT_BANDS
         rec=read_npz(src,max_windows=args.max_windows)
-        mat=fc_matrix(rec)
-        a,b=np.triu_indices(rec.n_channels,k=1)
-        edges=sorted(((abs(float(mat[i,j])),rec.channels[i],rec.channels[j],float(mat[i,j]))
-                      for i,j in zip(a,b)),reverse=True)[:min(10,len(a))]
-        return {'source':str(src),'n_windows_sampled':len(rec.data),'n_channels':rec.n_channels,
-                'mean_absolute_pearson':float(np.mean(np.abs(mat[a,b]))) if len(a) else None,
-                'strongest_edges':[{'from':x,'to':y,'pearson_r':v} for _,x,y,v in edges],
-                'note':'Pearson correlation does not imply causation or clinical diagnosis'}
+        bands=DEFAULT_BANDS if args.bands is None else args.bands
+        output=compute_connectivity(rec.data,rec.sfreq,method=args.method,
+                                    bands=bands,segment_seconds=args.segment_seconds,backend=args.backend)
+        dest=self.output_root/'connectivity'/uuid.uuid4().hex
+        dest.mkdir(parents=True,exist_ok=False)
+        outfile=dest/'connectivity.npz'
+        np.savez_compressed(outfile,**{f'fc_{k}':v for k,v in output['matrices'].items()},
+                            channel_names=np.asarray(rec.channels),sfreq=np.asarray(rec.sfreq))
+        metrics={}
+        for band,mat in output['matrices'].items():
+            ix=np.triu_indices(len(rec.channels),k=1)
+            vals=np.abs(mat[ix]);metrics[band]={'mean_absolute_connectivity':float(np.mean(vals)),
+                                                  'max_absolute_connectivity':float(np.max(vals))}
+        info={'source':str(src),'method':args.method,'backend':args.backend,'bands_hz':{k:list(v) for k,v in bands.items()},
+              'n_windows_sampled':len(rec.data),'n_channels':rec.n_channels,
+              'n_observations':output['n_observations'],'scientific_warnings':output['warnings'],
+              'estimator':output['estimator'],'metrics_by_band':metrics,
+              'matrix_npz':str(outfile),'note':'Functional connectivity is descriptive, not causal or diagnostic.'}
+        if args.method=='pearson':
+            m=output['matrices']['broadband'];inds=np.triu_indices(len(rec.channels),1)
+            info['mean_absolute_pearson']=float(np.abs(m[inds]).mean())
+            edges=sorted(((abs(float(m[i,j])),rec.channels[i],rec.channels[j],float(m[i,j]))
+                          for i,j in zip(*inds)),reverse=True)[:10]
+            info['strongest_edges']=[{'from':a,'to':b,'pearson_r':v} for _,a,b,v in edges]
+        manifest=dest/'connectivity_manifest.json'
+        info.update({'source_sha256':sha256_file(src),'environment':environment_info()})
+        json_write_atomic(manifest,info)
+        info['manifest_json']=str(manifest)
+        return info
+
+    def assess_eeg_quality(self,args:QcArgs):
+        src=self._resolve(args.source,suffix=SUPPORTED_RAW)
+        from .qc import assess_windows
+        if src.suffix.lower()=='.npz':
+            with np.load(src,allow_pickle=False) as z:
+                if 'data' not in z or z['data'].ndim not in (2,3):
+                    raise ValueError('QC NPZ must contain EEG data [channels,samples] or [windows,channels,samples].')
+                data=z['data'];sfreq=float(np.asarray(z['sfreq']).item())
+                if data.ndim==2:data=data[None,:,:]
+                unit=str(np.asarray(z['data_unit']).item()) if 'data_unit' in z else 'uV'
+                names=list(map(str,z['channel_names'])) if 'channel_names' in z else [f'Ch{i+1}' for i in range(data.shape[1])]
+                data=data[:args.max_windows]
+        else:
+            from eeg_universal import load_raw
+            raw=load_raw(src)
+            try:
+                sfreq=float(raw.info['sfreq']);names=list(raw.ch_names)
+                samples=min(raw.n_times,int(sfreq*args.max_raw_seconds))
+                data=raw.get_data(start=0,stop=samples)[None,:,:]
+                unit='V'
+            finally:raw.close()
+        result=assess_windows(data,sfreq,unit=unit,flat_uv=args.flat_uv,
+            high_amplitude_uv=args.high_amplitude_uv,line_ratio_limit=args.line_ratio_limit)
+        for c in result['channels']:c['name']=names[c['index']]
+        result['flagged_channels']=[names[i] for i in result['flagged_channel_indices']]
+        result['source']=str(src)
+        return result
+
+    def propose_preprocessing(self,args:ProposalArgs):
+        qc=self.assess_eeg_quality(QcArgs(source=args.source,max_windows=args.qc_max_windows))
+        # Suggest, do not automatically alter data or silently discard channels.
+        params={'source':args.source,'target_sfreq':min(250.,qc['sfreq']),
+                'bandpass_low':.5,'bandpass_high':min(45.,.4*qc['sfreq']),
+                'notch_freqs':[f for f in (50.,60.) if f < min(250.,qc['sfreq'])/2],
+                'use_ica':False,'interpolate_missing':False}
+        review=review_preprocessing(params,input_sfreq=qc['sfreq'])
+        return {'source':args.source,'qc':qc,'proposal':params,
+                'scientific_review':review.to_dict(),
+                'requires_human_review':bool(qc['flagged_channels']),
+                'note':'No preprocessing has been performed. Researcher must explicitly choose ICA/interpolation.'}
+
+    def validate_eeg(self,args:IntegrityArgs):
+        src=self._resolve(args.source,suffix=SUPPORTED_RAW)
+        report={'source':str(src),'size_bytes':src.stat().st_size,'sha256':sha256_file(src),
+                'format':src.suffix.lower(),'status':'pass','issues':[]}
+        if src.suffix.lower()=='.npz':
+            # Check versioned metadata sidecar for Core-generated outputs.
+            sidecar=src.parent/'output_metadata.json'
+            if sidecar.is_file():
+                from .quality_reports import validate_output_metadata
+                try:
+                    validate_output_metadata(json.loads(sidecar.read_text(encoding='utf-8')),src)
+                    report['output_metadata_status']='pass'
+                    report['output_metadata_json']=str(sidecar)
+                except (ValueError,KeyError,OSError,TypeError) as error:
+                    report['output_metadata_status']='invalid'
+                    report['status']='requires_review'
+                    report['issues'].append(f'Output metadata: {error}')
+            with np.load(src,allow_pickle=False) as z:
+                if 'data' not in z:raise ValueError('NPZ has no EEG data field')
+                x=z['data']
+                if x.ndim not in (2,3):raise ValueError('EEG NPZ data must be 2D or 3D')
+                if x.size==0:raise ValueError('EEG NPZ data must be nonempty')
+                bad=int(np.size(x)-np.count_nonzero(np.isfinite(x)))
+                report['shape']=list(x.shape);report['nonfinite_samples']=bad
+                if bad:report['status']='requires_review';report['issues'].append(f'{bad} non-finite EEG samples')
+                sfreq=float(np.asarray(z['sfreq']).item()) if 'sfreq' in z else 0
+                if sfreq<=0:report['status']='requires_review';report['issues'].append('Invalid or missing sfreq')
+                report['sfreq']=sfreq
+                if 'channel_names' in z and len(z['channel_names'])!=x.shape[-2]:
+                    report['status']='requires_review';report['issues'].append('Channel-name count mismatch')
+        else:
+            report.update(self.inspect_eeg(InspectArgs(source=str(src))))
+        return report
+
+    def compare_eeg_quality(self, args: QualityReportArgs):
+        src=self._resolve(args.source,suffix={'.npz'})
+        # Sidecar is tied to a verified processed artifact, not an arbitrary path.
+        self.inspect_output_metadata(MetadataArgs(source=str(src)))
+        path=src.parent/'quality_comparison.json'
+        if not path.is_file():
+            raise FileNotFoundError('No paired QC report; reprocess this recording with Core >=0.4.1')
+        report=json.loads(path.read_text(encoding='utf-8'))
+        from .quality_reports import QC_REPORT_SCHEMA
+        if report.get('schema_id')!=QC_REPORT_SCHEMA:
+            raise ValueError('Unsupported QC comparison schema')
+        return {'source':str(src),'status':report['status'],
+                'paired_windows':report['paired_windows'],
+                'paired_channels':report['paired_channels'],
+                'window_rejection':report['window_rejection'],
+                'summary':report.get('summary',{}),
+                'comparability':report['comparability'],
+                'quality_comparison_json':str(path),
+                'quality_comparison_csv':str(src.parent/'quality_comparison.csv'),
+                'quality_comparison_html':str(src.parent/'quality_comparison.html')}
+
+    def inspect_output_metadata(self,args:MetadataArgs):
+        src=self._resolve(args.source,suffix={'.npz'})
+        path=src.parent/'output_metadata.json'
+        if not path.is_file():
+            raise FileNotFoundError('No standardized metadata; reprocess this recording with Core >=0.4.1')
+        from .quality_reports import validate_output_metadata
+        info=json.loads(path.read_text(encoding='utf-8'))
+        validate_output_metadata(info,src)
+        return {'source':str(src),'status':'pass',
+                'schema_id':info['schema_id'], 'recording':info['recording'],
+                'data':info['data'], 'preprocessing_parameters':info['preprocessing']['parameters'],
+                'quality':info['quality'], 'output_metadata_json':str(path)}
+
+    def batch_preprocess(self,args:BatchArgs):
+        from .batch import preprocess_dataset
+        return preprocess_dataset(self,**args.model_dump(),progress=self._batch_progress)
+
+    @staticmethod
+    def _batch_progress(event:dict):
+        try:
+            from langgraph.config import get_stream_writer
+            get_stream_writer()({'kind':'batch_progress',**event})
+        except (ImportError,RuntimeError,LookupError):pass
 
     def extract_features(self, args: FeatureArgs):
         """Produce inspectable, per-window/channel numerical features, not LLM guesses."""
@@ -200,6 +421,8 @@ class EEGTools:
             }
         manifest = {
             'source': str(src),
+            'source_sha256': sha256_file(src),
+            'environment': environment_info(),
             'n_windows_sampled': len(indices),
             'window_indices': indices.tolist(),
             'n_channels': len(channels),

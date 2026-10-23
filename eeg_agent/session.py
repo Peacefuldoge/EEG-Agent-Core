@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterator
 from .persistence import SessionStore
 
 STRATEGIES = ('plan-execute', 'react', 'rewoo')
-DEFAULT_APPROVAL_TOOLS = frozenset({'preprocess_eeg'})
+DEFAULT_APPROVAL_TOOLS = frozenset({'preprocess_eeg','batch_preprocess'})
 
 
 def _content(chunk):
@@ -253,7 +253,7 @@ class EEGSession:
                'strategy':self.strategy}
         yield from self._stream_graph(run=run,initial=initial)
 
-    def resume_run(self,thread_id,*,approved:bool | None=None):
+    def resume_run(self,thread_id,*,approved:bool | None=None,parameters:dict | None=None):
         """Resume a paused graph; 'approved' is REQUIRED for HITL requests.
 
         For a crashed/interrupted non-HITL graph, set approved=None; the last
@@ -264,11 +264,38 @@ class EEGSession:
             raise ValueError('Resume requires checkpoint=True')
         run=self.get_run(thread_id)
         if run['status']=='awaiting_approval':
-            if not isinstance(approved,bool):
-                raise ValueError('Approval decision required (True or False)')
-            resume={'approved':approved}
+            if parameters is not None:
+                if approved is not None or not isinstance(parameters,dict) or not parameters:
+                    raise ValueError('Parameter edits require a non-empty dict and no approve/reject decision')
+                pending=run.get('pending') or []
+                if len(pending)!=1 or not isinstance(pending[0],dict):
+                    raise ValueError('Expected exactly one pending operation for parameter editing')
+                operation=pending[0]
+                current=dict(operation.get('arguments') or {})
+                if parameters.get('source',current.get('source'))!=current.get('source'):
+                    raise ValueError('Cannot change input source through approval edits')
+                current.update(parameters)
+                spec=self.tools.registry.get(operation.get('tool'))
+                if spec is None:raise ValueError('Pending approval references an unknown tool')
+                current=spec.args.model_validate(current).model_dump()
+                if operation.get('tool')=='preprocess_eeg':
+                    from .science import review_preprocessing
+                    review=review_preprocessing(current)
+                    if review.errors:raise ValueError('; '.join(review.errors))
+                if operation.get('tool')=='batch_preprocess':
+                    from .schema import PreprocessArgs
+                    from .science import review_preprocessing
+                    candidate=PreprocessArgs.model_validate({'source':'placeholder.edf',
+                                                             **current.get('preprocessing',{})})
+                    review=review_preprocessing(candidate.model_dump())
+                    if review.errors:raise ValueError('; '.join(review.errors))
+                resume={'arguments':parameters}
+            elif isinstance(approved,bool):
+                resume={'approved':approved}
+            else:
+                raise ValueError('Approval decision required (True or False), or provide parameter edits')
         elif run['status'] in ('running','interrupted','failed'):
-            if approved is not None:
+            if approved is not None or parameters is not None:
                 raise ValueError('No pending approval for this task')
             resume=None
         else:

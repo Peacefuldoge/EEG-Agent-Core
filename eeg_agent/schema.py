@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator, ValidationInfo
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -26,6 +26,7 @@ class PreprocessArgs(StrictModel):
     ignore_annotations: bool = False
     events_tsv: str | None = None
     interpolate_missing: bool = False
+    use_cache: bool = True
 
     @model_validator(mode='after')
     def valid_combo(self):
@@ -58,17 +59,63 @@ class FeatureArgs(StrictModel):
 class ConnectivityArgs(StrictModel):
     source: str
     max_windows: int = Field(default=32, ge=1, le=128)
+    method: Literal['pearson','coh','imcoh','plv','pli','wpli'] = 'pearson'
+    backend: Literal['scipy','mne'] = 'scipy'
+    bands: dict[str,tuple[float,float]] | None = None
+    segment_seconds: float = Field(default=1., gt=0, le=10)
+
+class QcArgs(StrictModel):
+    source: str
+    max_windows: int = Field(default=32,ge=1,le=256)
+    max_raw_seconds: float = Field(default=120.,gt=0,le=1200)
+    flat_uv: float = Field(default=.25,gt=0,le=20)
+    high_amplitude_uv: float = Field(default=250.,gt=0,le=2000)
+    line_ratio_limit: float = Field(default=5.,gt=1,le=100)
+
+class QualityReportArgs(StrictModel):
+    source: str = Field(description='Preprocessed EEG NPZ path; QC sidecars generated during preprocessing')
+
+class MetadataArgs(StrictModel):
+    source: str = Field(description='Preprocessed EEG NPZ path with standardized output metadata sidecar')
+
+class IntegrityArgs(StrictModel):
+    source: str
+    max_windows: int = Field(default=64,ge=1,le=512)
+
+class BatchArgs(StrictModel):
+    source_dir: str
+    preprocessing: dict[str,Any] = Field(default_factory=dict)
+    recursive: bool = True
+    max_files: int = Field(default=1000,ge=1,le=10000)
+    continue_on_error: bool = True
+
+class ProposalArgs(StrictModel):
+    source: str
+    qc_max_windows: int = Field(default=32,ge=1,le=256)
 
 class VisualizeArgs(StrictModel):
     source: str
     plots: str = Field(default='default', description='default, all, or comma-separated existing plot names')
     max_windows: int = Field(default=32, ge=1, le=128)
 
+BUILTIN_TOOL_NAMES = frozenset({'inspect_eeg','preprocess_eeg','analyze_spectrum',
+    'analyze_connectivity','visualize_eeg','extract_features','assess_eeg_quality',
+    'propose_preprocessing','validate_eeg','batch_preprocess',
+    'compare_eeg_quality','inspect_output_metadata'})
+
 class Step(StrictModel):
     id: str = Field(pattern=r'^E[1-9][0-9]*$')
-    tool: Literal['inspect_eeg','preprocess_eeg','analyze_spectrum','analyze_connectivity','visualize_eeg','extract_features']
+    tool: str = Field(min_length=1,max_length=64,pattern=r'^[a-z][a-z0-9_]*$')
     args: dict[str,Any]
     depends_on: list[str] = Field(default_factory=list)
+
+    @field_validator('tool')
+    @classmethod
+    def check_allowed(cls,value,info:ValidationInfo):
+        available=(info.context or {}).get('allowed_tools',BUILTIN_TOOL_NAMES)
+        if value not in available:
+            raise ValueError('Tool is not registered/allowed: '+value)
+        return value
 
 class Plan(StrictModel):
     steps: list[Step] = Field(min_length=1,max_length=12)
@@ -82,5 +129,7 @@ class Plan(StrictModel):
         for s in self.steps:
             if s.id in s.depends_on or any(dep not in seen for dep in s.depends_on):
                 raise ValueError(f'{s.id} depends on nonexistent or future step')
+            if len(s.depends_on)!=len(set(s.depends_on)):
+                raise ValueError('Duplicate dependencies')
             seen.add(s.id)
         return self

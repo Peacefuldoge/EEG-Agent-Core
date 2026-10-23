@@ -10,7 +10,7 @@ SYSTEM = ('You are an EEG research workflow orchestrator. Do not diagnose diseas
           'Scientific numbers must come from tools. Never invent channel data, '
           'never propose arbitrary code or shell commands. Use tools only. '
           'Prefer inspect_eeg, preprocess_eeg, analyze_spectrum, '
-          'analyze_connectivity, extract_features, visualize_eeg. '
+          'assess_eeg_quality, propose_preprocessing, validate_eeg, batch_preprocess, compare_eeg_quality, inspect_output_metadata, analyze_connectivity, extract_features, visualize_eeg. '
           'When given an input path use the reference $input. '
           'After preprocessing, use $latest_npz or $E#.output_npz; extract_features works only on EEG-window NPZ and returns feature NPZ (not EEG). '
           'If data is already a preprocessed 3D NPZ, skip preprocessing. '
@@ -54,13 +54,13 @@ class QwenModel:
         if replanning:
             extra+=' Previous attempt failed. Produce a DIFFERENT safe plan; do not repeat the same failed step without changing parameters.'
         prompt={'task':state['task'],'input_file':state['input_path'],
-                'available_tools':catalog,'completed_evidence':state.get('evidence',{}),
+                'available_tools':catalog,'completed_evidence':state.get('evidence',{}),'qc_summary':state.get('qc_summary',{}),
                 'last_error':state.get('error'),
                 'required_response':{'steps':[{'id':'E1','tool':'inspect_eeg','args':{'source':'$input'},'depends_on':[]}]},
                 'instructions':extra+' Output valid JSON only, 1-12 steps. No markdown. '
                           'Use $input or $latest_npz for sources; only refer to prior $E#.field keys.'}
         msg=self.chat.invoke([SystemMessage(content=SYSTEM),HumanMessage(content=json.dumps(prompt,ensure_ascii=False,default=str))])
-        return parse_plan(extract_json(str(msg.content)))
+        return parse_plan(extract_json(str(msg.content)), allowed_tools=set(tools.registry))
 
     def react(self, messages:list, tool_schemas:list):
         # Tool-call parser happens in vLLM; LangChain passes OpenAI-compatible tools.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eeg-agent-core"
-version = "0.3.2"
+version = "0.4.1"
 description = "Reusable EEG scientific tools and optional LangGraph ReAct, Plan-Execute, ReWOO adapters; no UI or vLLM dependency"
 readme = "README.md"
 license = "MIT"
@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = ["matplotlib>=3.8"]
+connectivity = ["mne-connectivity>=0.7,<1"]
 langgraph = [
     "langgraph>=1.0,<2", "langgraph-checkpoint-sqlite>=3.0,<5",
     "langchain-openai>=1.0,<2", "langchain-core>=1.0,<2", "openai>=2.0,<3"

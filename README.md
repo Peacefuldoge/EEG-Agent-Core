@@ -1,3 +1,13 @@
+> **v0.4.1**: Automatic paired pre/post QC reports, standardized output metadata sidecars, and new Agent read-only tools. See [README_QC_METADATA.md](README_QC_METADATA.md).
+
+# EEG-Agent Core v0.4.0
+
+**Current release:** Independent QC Agent Tools, resumable batch preprocessing, six connectivity methods, scientific parameter reviews, QC-aware planning, read-only parallel steps, editable HITL requiring reapproval, dynamic strict tool registration, content-addressed cache, integrity reports and reproducibility manifests. See **[README_V040.md](README_V040.md)**.
+
+The scientific package remains independent of Chainlit, CLI, vLLM and downloaded model weights.
+
+---
+
 ## v0.3.2 additions
 
 See **[README_RUNTIME.md](README_RUNTIME.md)** for streamed events, approvals, checkpoint recovery and Python API.

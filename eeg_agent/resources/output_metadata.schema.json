@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EEG-Agent standardized preprocessed recording sidecar v1.0",
+  "description": "Project-local research metadata format, NOT an official BIDS or NWB schema. Schema id is stable; web URL is illustrative only.",
+  "type": "object",
+  "required": ["schema_id", "schema_version", "recording", "data", "preprocessing", "quality", "provenance", "integrity", "metadata_standard"],
+  "properties": {
+    "schema_id": {"const": "org.eeg-agent.preprocessed-recording/1.0"},
+    "schema_version": {"const": "1.0"},
+    "created_utc": {"type": "string"},
+    "recording": {
+      "type": "object",
+      "required": ["source_path", "source_sha256", "source_format", "subject_id"],
+      "properties": {
+        "source_path": {"type": "string"},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_format": {"type": "string"},
+        "subject_id": {"type": "string"}
+      }
+    },
+    "data": {
+      "type": "object",
+      "required": ["path", "sha256", "shape", "dimension_order", "data_unit", "sfreq_hz", "channels", "n_channels", "n_windows"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "shape": {"type": "array", "prefixItems": [{"type":"integer", "minimum":1}, {"type":"integer", "minimum":1}, {"type":"integer", "minimum":2}], "items":false},
+        "dimension_order": {"const": ["window", "channel", "sample"]},
+        "data_unit": {"const": "uV"},
+        "sfreq_hz": {"type":"number", "exclusiveMinimum":0},
+        "channels": {"type":"array", "items":{"type":"string"}},
+        "n_channels": {"type":"integer", "minimum":1},
+        "n_windows": {"type":"integer", "minimum":1}
+      }
+    },
+    "preprocessing": {"type":"object", "required":["parameters","window_qc"]},
+    "quality": {"type":"object", "required":["comparison_status","report_files","comparison_schema"]},
+    "provenance": {"type":"object"},
+    "integrity": {"type":"object", "required":["source_sha256","output_sha256"]},
+    "metadata_standard": {"type":"string"}
+  }
+}
