@@ -1,3 +1,5 @@
+[中文项目说明](README.zh-CN.md) · [中文可视化指南](docs/visualization.zh-CN.md)
+
 > **v0.4.1**: Automatic paired pre/post QC reports, standardized output metadata sidecars, and new Agent read-only tools. See [README_QC_METADATA.md](README_QC_METADATA.md).
 
 # EEG-Agent Core v0.4.0
