@@ -56,6 +56,8 @@ class QwenModel:
         prompt={'task':state['task'],'input_file':state['input_path'],
                 'available_tools':catalog,'completed_evidence':state.get('evidence',{}),'qc_summary':state.get('qc_summary',{}),
                 'last_error':state.get('error'),
+                 'active_plan_id':state.get('active_plan_id'),
+                 'prior_evidence_reuse':'Only explicit $P1:E1.field or $P2:E1.field may reuse a completed step from an older plan; plain $E1.field always refers to a step in the new plan.',
                 'required_response':{'steps':[{'id':'E1','tool':'inspect_eeg','args':{'source':'$input'},'depends_on':[]}]},
                 'instructions':extra+' Output valid JSON only, 1-12 steps. No markdown. '
                           'Use $input or $latest_npz for sources; only refer to prior $E#.field keys.'}

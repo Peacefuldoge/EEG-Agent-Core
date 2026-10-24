@@ -8,6 +8,7 @@ from .schema import Step
 from .execution import execute_step,bind_value
 from .model import SYSTEM
 from .workflow_support import ready_batch,execute_ready
+from .plan_versions import activate_plan
 
 class WorkflowState(TypedDict,total=False):
     task:str
@@ -26,6 +27,9 @@ class WorkflowState(TypedDict,total=False):
     messages:Annotated[list,add_messages]
     tool_cursor:int
     qc_summary:dict
+    plan_version:int
+    active_plan_id:str
+    plan_history:list[dict]
 
 class AgentGraphs:
     def __init__(self, model, tools, *, max_steps:int=12, max_replans:int=1, approval_tools=None):
@@ -135,7 +139,7 @@ class AgentGraphs:
         def plan(s):
             try:
                 steps=self.model.plan(s,self.tools,rewoo=False,replanning=s.get('replans',0)>0)
-                return {'steps':steps,'cursor':0,'error':None,'status':'running'}
+                return activate_plan(s,steps)
             except Exception as exc:
                 return {'error':f'Planning failed: {exc}','status':'failed','steps':[]}
         def execute(s):
@@ -167,7 +171,7 @@ class AgentGraphs:
         def planner(s):
             try:
                 steps=self.model.plan(s,self.tools,rewoo=True,replanning=s.get('replans',0)>0)
-                return {'steps':steps,'cursor':0,'error':None,'status':'running'}
+                return activate_plan(s,steps)
             except Exception as exc:
                 return {'error':f'Planning failed: {exc}','status':'failed','steps':[]}
         def worker(s):

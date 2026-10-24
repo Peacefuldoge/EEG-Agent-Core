@@ -221,6 +221,9 @@ class EEGSession:
                 'input_file':run['input_file'],'task':run['task'],
                 'answer':answer,'error':state.get('error'),
                 'trace':state.get('trace',[]),'evidence':state.get('evidence',{}),
+                 'plan_version':state.get('plan_version',0),
+                 'active_plan_id':state.get('active_plan_id'),
+                 'plan_history':state.get('plan_history',[]),
                 'latest_npz':latest_npz,'pending':pending}
         manifest=self.output_root/f'agent_run_{thread_id}.json'
         manifest.write_text(json.dumps(record,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
@@ -244,7 +247,8 @@ class EEGSession:
         thread_id=uuid.uuid4().hex
         initial={'task':task,'input_path':str(source),'strategy':self.strategy,
                  'cursor':0,'iterations':0,'replans':0,'tool_cursor':0,'steps':[],
-                 'trace':[],'evidence':{},'latest_npz':None,'error':None,'status':'running'}
+                 'trace':[],'evidence':{},'latest_npz':None,'error':None,'status':'running',
+                  'plan_version':0,'active_plan_id':None,'plan_history':[]}
         self.store.create_run(session_id=self.session_id,thread_id=thread_id,
                               task=message,input_file=str(source),strategy=self.strategy,
                               model=self.model_name)

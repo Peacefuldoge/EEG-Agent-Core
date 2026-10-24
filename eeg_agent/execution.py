@@ -5,7 +5,7 @@ from typing import Any
 from .schema import Plan, Step
 from .tools import EEGTools
 
-REF=re.compile(r'^\$(input|latest_npz|E[1-9][0-9]*)(?:\.([a-z][a-zA-Z0-9_]*))?$')
+REF=re.compile(r'^\$(input|latest_npz|(?:P[1-9][0-9]*:)?E[1-9][0-9]*)(?:\.([a-z][a-zA-Z0-9_]*))?$')
 
 def bind_value(obj:Any, state:dict) -> Any:
     """Substitute only safe named references; never eval, format or expand paths."""
@@ -20,6 +20,8 @@ def bind_value(obj:Any, state:dict) -> Any:
             value=state.get('latest_npz')
         else:
             evidence=state.get('evidence',{})
+            if key.startswith('P1:'):
+                key=key.split(':',1)[1]  # backwards-compatible first plan
             if key not in evidence:
                 raise ValueError(f'Unresolved dependency: {key}')
             value=evidence[key]

@@ -104,7 +104,7 @@ BUILTIN_TOOL_NAMES = frozenset({'inspect_eeg','preprocess_eeg','analyze_spectrum
     'compare_eeg_quality','inspect_output_metadata'})
 
 class Step(StrictModel):
-    id: str = Field(pattern=r'^E[1-9][0-9]*$')
+    id: str = Field(pattern=r'^(?:E[1-9][0-9]*|P(?:[2-9]|[1-9][0-9]+):E[1-9][0-9]*)$')
     tool: str = Field(min_length=1,max_length=64,pattern=r'^[a-z][a-z0-9_]*$')
     args: dict[str,Any]
     depends_on: list[str] = Field(default_factory=list)
