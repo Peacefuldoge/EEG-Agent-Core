@@ -5,7 +5,7 @@ This package contains no Web UI, terminal frontend or vLLM server. Existing host
 ## What changed
 
 - **Token streaming**: `EEGSession.stream_chat()` yields incremental text fragments. `EEGSession.stream_agent()` yields LangGraph `messages` fragments for answer/summarization nodes, while excluding raw planner JSON and tool-call arguments.
-- **Node status**: events include `node_started` (`debug` stream), `node_completed` (`updates` stream), and `tool_progress` (`custom` stream). A long scientific tool currently reports start/finish, **not per-file percentages**.
+- **Node status**: events include `node_started` (`debug` stream), `node_completed` (`updates` stream), and `tool_progress` (`custom` stream). A long scientific tool reports started/completed/failed/rejected with step and duration metadata, **not per-file percentages**.
 - **Human approval**: by default, `preprocess_eeg` is gated by LangGraph `interrupt()` in all three strategies. Approval is required *before* calling MNE. `resume_run(thread_id, approved=True|False)` uses the **same** `thread_id` and `Command(resume=...)`.
 - **Durable sessions**: `agent_sessions.sqlite3` stores session IDs, chat turns, run metadata, strategy and current file; `agent_checkpoints.sqlite3` stores LangGraph checkpoints. Individual outputs and manifests continue to live in `output_root`.
 - **Recovery**: after restarting Python, create `EEGSession(..., session_id=previous_id)` and use `list_runs()` / `resume_run()`. Completed history is stored in full. Only the 10 most recent turns are automatically passed to Qwen as chat context.
@@ -78,7 +78,7 @@ Events are plain Python dictionaries with `type` and optional fields:
 | `token` | `text`, `node`, `scope` | append visible text |
 | `node_started` | `node`, `thread_id` | show running step |
 | `node_completed` | `node`, `status` | complete step |
-| `tool_progress` | `data.tool`, `data.phase` | show tool state |
+| `tool_progress` | `tool`, `phase`, `step_id`, `attempt_id`, `duration_ms`, `error` (also in `data`) | show completed vs failed tool steps |
 | `approval_required` | `thread_id`, `requests` | display Approve/Reject UI |
 | `run_finished` | `record` | show final output / link to artifacts |
 | `completed` | `answer` | normal chat completed |
@@ -93,4 +93,4 @@ The UI is free to use Chainlit, React, Rich or an existing LangGraph interface. 
 4. The first resume after a valid HITL interruption must explicitly supply `approved=True` or `approved=False`; the core will not interpret `None` as consent.
 5. SQLite is intended for **trusted local single-user usage**. Do not expose it as a multi-tenant service without authentication, authorization, access controls, retention policy and encryption/PHI precautions. Session/run data can include paths and other potentially identifiable scientific metadata.
 6. `debug` streaming is used internally to detect node starts but its full payload is never forwarded to the UI. Tool results are persisted in manifests; outputs must remain in the configured data/output roots.
-7. Automated numerical tests and mocked LangGraph execution are provided. The source archive was **not** end-to-end tested against your live WSL2 vLLM/Qwen3-8B service, and Chainlit browser behavior requires local validation.
+7. Automated numerical tests, mocked LangGraph execution and optional real-LangGraph smoke tests are provided. The source archive was **not** end-to-end tested against your live WSL2 vLLM/Qwen3-8B service, and Chainlit browser behavior requires local validation.

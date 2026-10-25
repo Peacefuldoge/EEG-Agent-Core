@@ -2,7 +2,7 @@
 
 EEGTools requires scientific dependencies; AgentGraphs is only loaded when used.
 """
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 __all__ = ["EEGSession", "STRATEGIES", "EEGTools", "SUPPORTED_RAW", "AgentGraphs", "build_agent", "channel_config_path", "extract_handcrafted_features", "DEFAULT_BANDS", "FeatureMatrix", "SessionStore", "compute_connectivity", "assess_windows", "review_preprocessing", "preprocess_dataset", "paired_quality_report", "validate_output_metadata", "output_metadata_schema_path"]
 
 

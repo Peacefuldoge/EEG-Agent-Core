@@ -120,7 +120,7 @@ class EEGTools:
                             'samples_per_window':int(x.shape[2]),'sfreq':float(z['sfreq']),
                             'duration_seconds':round(x.shape[0]*x.shape[2]/float(z['sfreq']),2)}
         from eeg_universal import load_raw
-        raw = load_raw(path, input_sfreq=args.input_sfreq, input_channels=args.input_channels)
+        raw = load_raw(path, input_sfreq=args.input_sfreq, input_channels=args.input_channels, mat_unit=args.input_unit)
         try:
             return {'source':str(path),'kind':'continuous','channels':list(raw.ch_names),
                     'n_channels':len(raw.ch_names),'sfreq':float(raw.info['sfreq']),
@@ -145,12 +145,12 @@ class EEGTools:
             if item['size_bytes'] > self.max_source_mb*1024*1024:
                 raise ValueError('Input EEG companion exceeds source size limit')
         if args.use_cache:
-            return self.cache.execute(source,params,'preprocess-v0.4.1',compute,
+            return self.cache.execute(source,params,'preprocess-v0.4.2',compute,
                                       data_root=self.data_root,extras=extras)
         result=compute()
         artifact=Path(result['output_npz'])
         manifest=artifact.with_suffix('.provenance.json')
-        json_write_atomic(manifest,provenance(source,params,algorithm='preprocess-v0.4.1',output=artifact,
+        json_write_atomic(manifest,provenance(source,params,algorithm='preprocess-v0.4.2',output=artifact,
                                                    data_root=self.data_root,extras=extras))
         return {**result,'cache_hit':False,'cache_key':None,'provenance_json':str(manifest)}
 
@@ -163,7 +163,7 @@ class EEGTools:
                        channels=tuple(args.target_channels) if args.target_channels is not None else None,
                        channel_count=args.target_count, interpolate_missing=args.interpolate_missing,
                        use_ica=args.use_ica)
-        raw = load_raw(src,input_sfreq=args.input_sfreq,input_channels=args.input_channels)
+        raw = load_raw(src,input_sfreq=args.input_sfreq,input_channels=args.input_channels,mat_unit=args.input_unit)
         try:
             if args.ignore_annotations:
                 blocks=[(0.,raw.n_times/raw.info['sfreq'],cfg.default_label)]
@@ -262,12 +262,14 @@ class EEGTools:
                     raise ValueError('QC NPZ must contain EEG data [channels,samples] or [windows,channels,samples].')
                 data=z['data'];sfreq=float(np.asarray(z['sfreq']).item())
                 if data.ndim==2:data=data[None,:,:]
-                unit=str(np.asarray(z['data_unit']).item()) if 'data_unit' in z else 'uV'
+                unit=str(np.asarray(z['data_unit']).item()) if 'data_unit' in z else (args.input_unit or 'uV')
+                if args.input_unit and args.input_unit.lower()!=unit.lower():
+                    raise ValueError('Explicit input_unit conflicts with NPZ data_unit')
                 names=list(map(str,z['channel_names'])) if 'channel_names' in z else [f'Ch{i+1}' for i in range(data.shape[1])]
                 data=data[:args.max_windows]
         else:
             from eeg_universal import load_raw
-            raw=load_raw(src)
+            raw=load_raw(src,mat_unit=args.input_unit)
             try:
                 sfreq=float(raw.info['sfreq']);names=list(raw.ch_names)
                 samples=min(raw.n_times,int(sfreq*args.max_raw_seconds))

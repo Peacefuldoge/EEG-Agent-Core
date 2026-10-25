@@ -419,7 +419,7 @@ def preprocess_raw(raw: mne.io.BaseRaw, cfg: Settings, *, event_blocks=None,
 
 
 def load_raw(path: Path, *, input_sfreq: float | None = None,
-             input_channels: Sequence[str] | None = None, mat_unit: str = 'uV'):
+             input_channels: Sequence[str] | None = None, mat_unit: str | None = None):
     """Supported input: FIF/EDF/BDF/SET/VHDR/CNT, NPY/NPZ NxT, MAT EEG struct or 2D data."""
     path = Path(path)
     suffix = path.suffix.lower()
@@ -428,6 +428,7 @@ def load_raw(path: Path, *, input_sfreq: float | None = None,
                '.vhdr': mne.io.read_raw_brainvision, '.cnt': mne.io.read_raw_cnt}
     if suffix in readers:
         return readers[suffix](path, preload=True, verbose='ERROR')
+    file_unit = None
     if suffix == '.npy':
         data = np.load(path, allow_pickle=False)
         sfreq = input_sfreq
@@ -435,6 +436,11 @@ def load_raw(path: Path, *, input_sfreq: float | None = None,
     elif suffix == '.npz':
         with np.load(path, allow_pickle=False) as z:
             data = z['data']
+            if 'data_unit' in z:
+                raw_unit = np.asarray(z['data_unit'])
+                if raw_unit.ndim != 0:
+                    raise ValueError('NPZ data_unit must be a scalar V, mV or uV')
+                file_unit = str(raw_unit.item())
             sfreq = input_sfreq if input_sfreq is not None else float(z['sfreq']) if 'sfreq' in z else None
             names = input_channels if input_channels is not None else list(z['channel_names'].astype(str)) if 'channel_names' in z else None
     elif suffix == '.mat':
@@ -471,7 +477,19 @@ def load_raw(path: Path, *, input_sfreq: float | None = None,
         raise ValueError(f'Channel names length {len(names)} does not match data {data.shape}')
     if sfreq is None or not np.isfinite(sfreq) or sfreq <= 0:
         raise ValueError('Numeric input requires valid --input-sfreq or sfreq in file')
-    factor = {'v': 1.0, 'mv': 1e-3, 'uv': 1e-6}[mat_unit.lower()]
+    def normalize_unit(value):
+        unit = str(value).strip().lower().replace('µ','u').replace('μ','u')
+        if unit not in ('v','mv','uv'):
+            raise ValueError(f'Unsupported EEG amplitude unit: {value!r}; expected V, mV or uV')
+        return unit
+    declared = normalize_unit(file_unit) if file_unit is not None else None
+    requested = normalize_unit(mat_unit) if mat_unit is not None else None
+    if declared and requested and declared != requested:
+        raise ValueError(f'Input unit {mat_unit!r} conflicts with NPZ data_unit={file_unit!r}; '
+                         'correct the metadata or omit the override before continuing')
+    # Legacy numeric files without metadata retain their documented uV default.
+    unit = declared or requested or 'uv'
+    factor = {'v': 1.0, 'mv': 1e-3, 'uv': 1e-6}[unit]
     info = mne.create_info(list(names), sfreq, ['eeg'] * len(names))
     return mne.io.RawArray(data.astype(np.float64) * factor, info, verbose='ERROR')
 
@@ -503,7 +521,7 @@ def main(argv=None):
     parser.add_argument('--eog-channels', help='Comma-separated EOG channel names')
     parser.add_argument('--input-sfreq', type=float, help='Sampling frequency for NPY/MAT if missing')
     parser.add_argument('--input-channels', help='Comma names / @file for NPY/MAT')
-    parser.add_argument('--mat-unit', choices=['V','mV','uV'], default='uV')
+    parser.add_argument('--mat-unit', choices=['V','mV','uV'], default=None, help='Numeric input unit override; NPZ data_unit takes precedence. Legacy files default to uV.')
     parser.add_argument('--disable-ica', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--visualize', action='store_true', help='Generate figures and HTML index from output NPZ')

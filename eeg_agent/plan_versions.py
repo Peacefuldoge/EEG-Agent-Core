@@ -14,7 +14,7 @@ _LOCAL = re.compile(r'^\$E[1-9][0-9]*(?:\.[a-z][a-zA-Z0-9_]*)?$')
 _EXPLICIT = re.compile(r'^\$P([1-9][0-9]*):E([1-9][0-9]*)(?:\.[a-z][a-zA-Z0-9_]*)?$')
 
 
-def activate_plan(state: dict, steps: list[dict]) -> dict:
+def activate_plan(state: dict, steps: list[dict], *, allowed_tools=None) -> dict:
     """Validate and namespace the *entire* plan before changing graph state.
 
     A successful plan generation increments the version, not a failed attempt.
@@ -58,15 +58,16 @@ def activate_plan(state: dict, steps: list[dict]) -> dict:
         local=step['id']
         step['id']= local if number==1 else f'{active}:{local}'
         step['args']=args
-        # Preserve original plan order, including newly inferred dependencies.
+        # Preserve plan order for priority; scheduler resolves actual dependencies.
         step['depends_on']=[(dep if number==1 else f'{active}:{dep}')
                              for dep in ordered_ids if dep in deps]
         transformed.append(step)
     # Validates dependencies and future/self references against the rewritten plan.
-    Plan.model_validate({'steps':transformed})
+    Plan.model_validate({'steps':transformed},
+                        context={'allowed_tools':allowed_tools} if allowed_tools is not None else None)
     previous=list(state.get('plan_history',[]))
     previous.append({'plan_id':active,'steps':transformed})
-    return {'steps':transformed,'cursor':0,'error':None,'status':'running',
+    return {'steps':transformed,'cursor':0,'step_status':{},'error':None,'status':'running',
             'plan_version':number,'active_plan_id':active,'plan_history':previous,
             # Never implicitly point a revised plan at a stale previous-plan artifact.
             'latest_npz':None}

@@ -193,7 +193,9 @@ class EEGSession:
                         if text and not getattr(chunk,'tool_call_chunks',None):
                             yield {'type':'token','text':text,'node':node,'scope':'agent','thread_id':thread_id}
                 elif mode=='custom' and isinstance(payload,dict):
-                    yield {'type':'tool_progress','data':payload,'thread_id':thread_id}
+                    yield {'type':'tool_progress','data':payload,'thread_id':thread_id,
+                           **{k:payload[k] for k in ('tool','phase','step_id','attempt_id','duration_ms','error')
+                              if k in payload}}
             if saver is not None:
                 snapshot=graph.get_state(config)
                 state.update(dict(getattr(snapshot,'values',{}) or {}))
@@ -224,6 +226,9 @@ class EEGSession:
                  'plan_version':state.get('plan_version',0),
                  'active_plan_id':state.get('active_plan_id'),
                  'plan_history':state.get('plan_history',[]),
+                 'step_status':state.get('step_status',{}),
+                 'tool_failures':state.get('tool_failures',0),
+                 'qc_summary':state.get('qc_summary',{}),
                 'latest_npz':latest_npz,'pending':pending}
         manifest=self.output_root/f'agent_run_{thread_id}.json'
         manifest.write_text(json.dumps(record,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
@@ -248,6 +253,7 @@ class EEGSession:
         initial={'task':task,'input_path':str(source),'strategy':self.strategy,
                  'cursor':0,'iterations':0,'replans':0,'tool_cursor':0,'steps':[],
                  'trace':[],'evidence':{},'latest_npz':None,'error':None,'status':'running',
+                 'step_status':{},'tool_failures':0,
                   'plan_version':0,'active_plan_id':None,'plan_history':[]}
         self.store.create_run(session_id=self.session_id,thread_id=thread_id,
                               task=message,input_file=str(source),strategy=self.strategy,

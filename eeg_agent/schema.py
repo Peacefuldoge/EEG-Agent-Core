@@ -9,6 +9,7 @@ class InspectArgs(StrictModel):
     source: str = Field(description='EEG file path or $input/$latest_npz reference')
     input_sfreq: float | None = Field(default=None, gt=0)
     input_channels: list[str] | None = None
+    input_unit: Literal['V', 'mV', 'uV'] | None = None
 
 class PreprocessArgs(StrictModel):
     source: str
@@ -19,6 +20,7 @@ class PreprocessArgs(StrictModel):
     target_channels: list[str] | None = None
     input_sfreq: float | None = Field(default=None, gt=0)
     input_channels: list[str] | None = None
+    input_unit: Literal['V', 'mV', 'uV'] | None = None
     bandpass_low: float = Field(default=0.5, ge=0)
     bandpass_high: float = Field(default=45.0, gt=0)
     notch_freqs: list[float] = Field(default_factory=lambda: [50.,60.])
@@ -66,6 +68,7 @@ class ConnectivityArgs(StrictModel):
 
 class QcArgs(StrictModel):
     source: str
+    input_unit: Literal['V', 'mV', 'uV'] | None = None
     max_windows: int = Field(default=32,ge=1,le=256)
     max_raw_seconds: float = Field(default=120.,gt=0,le=1200)
     flat_uv: float = Field(default=.25,gt=0,le=20)
@@ -125,11 +128,19 @@ class Plan(StrictModel):
         names = [s.id for s in self.steps]
         if len(set(names)) != len(names):
             raise ValueError('Step IDs must be unique')
-        seen = set()
+        ids=set(names)
+        by_id={s.id:set(s.depends_on) for s in self.steps}
         for s in self.steps:
-            if s.id in s.depends_on or any(dep not in seen for dep in s.depends_on):
-                raise ValueError(f'{s.id} depends on nonexistent or future step')
+            if s.id in s.depends_on or any(dep not in ids for dep in s.depends_on):
+                raise ValueError(f'{s.id} has a self-reference or unknown dependency')
             if len(s.depends_on)!=len(set(s.depends_on)):
                 raise ValueError('Duplicate dependencies')
-            seen.add(s.id)
+        visited=set(); visiting=set()
+        def visit(sid):
+            if sid in visiting:raise ValueError(f'Cyclic dependency detected at {sid}')
+            if sid in visited:return
+            visiting.add(sid)
+            for dep in by_id[sid]:visit(dep)
+            visiting.remove(sid);visited.add(sid)
+        for sid in names:visit(sid)
         return self

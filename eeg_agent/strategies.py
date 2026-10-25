@@ -1,6 +1,8 @@
 """Three LangGraph graphs sharing the same tool registry and local vLLM Qwen client."""
 from __future__ import annotations
 from typing import Any,Annotated,TypedDict
+from datetime import datetime, timezone
+import time
 from langgraph.graph import StateGraph,START,END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AIMessage,HumanMessage,SystemMessage,ToolMessage
@@ -9,6 +11,8 @@ from .execution import execute_step,bind_value
 from .model import SYSTEM
 from .workflow_support import ready_batch,execute_ready
 from .plan_versions import activate_plan
+from .qc_policy import evaluate_tool
+from .execution import finish_trace
 
 class WorkflowState(TypedDict,total=False):
     task:str
@@ -30,6 +34,8 @@ class WorkflowState(TypedDict,total=False):
     plan_version:int
     active_plan_id:str
     plan_history:list[dict]
+    step_status:dict[str,str]
+    tool_failures:int
 
 class AgentGraphs:
     def __init__(self, model, tools, *, max_steps:int=12, max_replans:int=1, approval_tools=None):
@@ -79,32 +85,71 @@ class AgentGraphs:
             return current if response.get('approved') is True else None
         raise ValueError('Too many approval edits; submit a new task')
 
+    def _guard(self, name, args, state, step_id):
+        """No LLM can bypass QC/science policy; human approval is explicit."""
+        decision=evaluate_tool(name,args,state.get('qc_summary'))
+        if decision.action=='reject':
+            raise ValueError('Scientific policy rejected operation: '+decision.reason)
+        if decision.action=='review' and name not in self.approval_tools:
+            raise ValueError('QC approval required: '+decision.reason)
+        return None  # caller invokes _approval outside error handling
+
     def _run_plan_steps(self,s):
-        cursor=s.get('cursor',0)
-        batch=ready_batch(s,self.tools,cursor,max_parallel=3,forbidden=self.approval_tools)
-        if not batch:return {'error':'No step at cursor','status':'failed'}
+        steps=s.get('steps',[])
+        completed=sum(raw['id'] in s.get('evidence',{}) for raw in steps)
+        if completed==len(steps):
+            return {'cursor':completed,'step_status':s.get('step_status',{}),'error':None}
+        batch=ready_batch(s,self.tools,s.get('cursor',0),max_parallel=3,forbidden=self.approval_tools)
+        if not batch:
+            return {'error':'DAG has unfinished steps but no eligible dependency-ready nodes',
+                    'status':'failed'}
         if s.get('iterations',0)+len(batch)>self.max_steps:
             return {'error':'Step budget exhausted','status':'failed'}
+        # All gated tools run singly. A gate can never approve several nodes
+        # together, even when the registry labels them parallel safe.
+        for step in batch:
+            if evaluate_tool(step.tool,step.args,s.get('qc_summary')).action!='allow':
+                batch=[step];break
         if len(batch)==1:
             step=batch[0]
-            try:args=bind_value(step.args,s)
+            try:
+                args=bind_value(step.args,s)
+                self._guard(step.tool,args,s,step.id)
             except Exception as exc:
-                return {'status':'failed','error':f'{type(exc).__name__}: {exc}',
-                    'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'error','error':str(exc)}]}
+                error=f'{type(exc).__name__}: {exc}'
+                entry={'step':step.id,'step_id':step.id,
+                       'attempt_id':f'{step.id}:attempt:{1+sum(t.get("step")==step.id for t in s.get("trace",[]))}',
+                       'tool':step.tool,'status':'error',
+                       'error':error,'started_at':datetime.now(timezone.utc).isoformat(),
+                       'finished_at':datetime.now(timezone.utc).isoformat(),'duration_ms':0.0}
+                self._progress(step.tool,'failed',step_id=step.id,error=error)
+                return {'status':'failed','error':error,
+                        'step_status':{**s.get('step_status',{}),step.id:'failed'},
+                        'trace':list(s.get('trace',[]))+[entry],
+                        'tool_failures':s.get('tool_failures',0)+1}
             authorized=self._approval(step.tool,args,step.id)
-            if authorized is True:authorized=args  # support legacy boolean approval providers
+            if authorized is True:authorized=args
             if authorized is False:authorized=None
             if authorized is None:
-                return {'status':'rejected','error':'User denied '+step.tool,
-                    'trace':list(s.get('trace',[]))+[{'step':step.id,'tool':step.tool,'status':'rejected'}]}
-            # If edited, preserve concrete values rather than rebind original refs.
+                error='User denied '+step.tool
+                self._progress(step.tool,'rejected',step_id=step.id,error=error)
+                return {'status':'rejected','error':error,
+                        'step_status':{**s.get('step_status',{}),step.id:'rejected'},
+                        'trace':list(s.get('trace',[]))+[{'step':step.id,'step_id':step.id,
+                        'tool':step.tool,'status':'rejected','error':error,
+                        'attempt_id':f'{step.id}:attempt:{1+sum(t.get("step")==step.id for t in s.get("trace",[]))}'}]}
             batch=[step.model_copy(update={'args':authorized})]
-        for step in batch:self._progress(step.tool,'started')
+        before=len(s.get('trace',[]))
+        for step in batch:self._progress(step.tool,'started',step_id=step.id)
         outcome=execute_ready(batch,s,self.tools)
-        for step in batch:self._progress(step.tool,'completed')
-        outcome.update(cursor=cursor+len(batch),iterations=s.get('iterations',0)+len(batch))
-        # A flagged QC response is a planning signal, not an authorization to
-        # silently interpolate or discard electrodes.
+        for item in outcome.get('trace',[])[before:]:
+            self._progress(item['tool'],'completed' if item['status']=='ok' else 'failed',
+                           step_id=item.get('step_id'),attempt_id=item.get('attempt_id'),
+                           duration_ms=item.get('duration_ms'),error=item.get('error'))
+        outcome.update(cursor=sum(raw['id'] in outcome.get('evidence',{}) for raw in steps),
+                       iterations=s.get('iterations',0)+len(batch),
+                       tool_failures=s.get('tool_failures',0)+sum(
+                           item['status']=='error' for item in outcome.get('trace',[])[before:]))
         for step in batch:
             qc=outcome.get('evidence',{}).get(step.id,{})
             if step.tool=='assess_eeg_quality' and qc.get('status')=='requires_review':
@@ -120,12 +165,18 @@ class AgentGraphs:
             return {'qc_summary':{'status':'unavailable','error':f'{type(exc).__name__}: {exc}'}}
 
     @staticmethod
-    def _progress(tool, phase):
+    def _progress(tool, phase, **details):
         try:
             from langgraph.config import get_stream_writer
-            get_stream_writer()({'kind': 'tool_progress', 'tool': tool, 'phase': phase})
-        except (ImportError, RuntimeError, LookupError):
+            get_stream_writer()({'kind':'tool_progress','tool':tool,'phase':phase,
+                                 **{k:v for k,v in details.items() if v is not None}})
+        except (ImportError,RuntimeError,LookupError):
             pass
+
+    @staticmethod
+    def _is_complete(s):
+        return bool(s.get('steps')) and all(
+            step['id'] in s.get('evidence',{}) for step in s.get('steps',[]))
 
     def _summary(self,state):
         try:
@@ -139,24 +190,26 @@ class AgentGraphs:
         def plan(s):
             try:
                 steps=self.model.plan(s,self.tools,rewoo=False,replanning=s.get('replans',0)>0)
-                return activate_plan(s,steps)
+                return activate_plan(s,steps,allowed_tools=set(self.tools.registry))
             except Exception as exc:
                 return {'error':f'Planning failed: {exc}','status':'failed','steps':[]}
         def execute(s):
-            if s.get('cursor',0)>=len(s.get('steps',[])) or s.get('iterations',0)>=self.max_steps:
+            if s.get('iterations',0)>=self.max_steps:
                 return {'error':'Step budget exhausted','status':'failed'}
             return self._run_plan_steps(s)
         def route_plan(s):
             if s.get('status')=='rejected':return 'finish'
             if s.get('error'):
                 return 'summary' if s.get('replans',0)>=self.max_replans or s.get('iterations',0)>=self.max_steps else 'replan'
-            return 'execute' if s.get('cursor',0)<len(s.get('steps',[])) and s.get('iterations',0)<self.max_steps else 'finish'
+            return 'finish' if self._is_complete(s) else ('execute' if s.get('iterations',0)<self.max_steps else 'finish')
         def replan(s):
             return {'replans':s.get('replans',0)+1}
         def finish(s):
-            unfinished=s.get('cursor',0)<len(s.get('steps',[]))
+            unfinished=not self._is_complete(s)
             error=s.get('error') or ('Step budget exhausted before plan completion' if unfinished else None)
-            return {'status':'rejected' if s.get('status')=='rejected' else ('failed' if error else 'completed'),'error':error}
+            status=('rejected' if s.get('status')=='rejected' else 'failed' if error else
+                    'partial_success' if s.get('tool_failures',0) else 'completed')
+            return {'status':status,'error':error}
         g.add_node('qc',self._qc_preflight);g.add_node('plan',plan);g.add_node('execute',execute);g.add_node('replan',replan)
         g.add_node('finish',finish);g.add_node('summary',self._summary)
         g.add_edge(START,'qc');g.add_edge('qc','plan')
@@ -171,19 +224,20 @@ class AgentGraphs:
         def planner(s):
             try:
                 steps=self.model.plan(s,self.tools,rewoo=True,replanning=s.get('replans',0)>0)
-                return activate_plan(s,steps)
+                return activate_plan(s,steps,allowed_tools=set(self.tools.registry))
             except Exception as exc:
                 return {'error':f'Planning failed: {exc}','status':'failed','steps':[]}
         def worker(s):
-            if s.get('cursor',0)>=len(s.get('steps',[])) or s.get('iterations',0)>=self.max_steps:
+            if s.get('iterations',0)>=self.max_steps:
                 return {'status':'failed','error':'Step budget exhausted'}
             return self._run_plan_steps(s)
         def replan(s):
             return {'replans':s.get('replans',0)+1}
         def solver(s):
-            unfinished=s.get('cursor',0)<len(s.get('steps',[]))
+            unfinished=not self._is_complete(s)
             error=s.get('error') or ('Step budget exhausted before plan completion' if unfinished else None)
-            status='rejected' if s.get('status')=='rejected' else ('failed' if error else 'completed')
+            status=('rejected' if s.get('status')=='rejected' else 'failed' if error else
+                    'partial_success' if s.get('tool_failures',0) else 'completed')
             return {'status':status,'error':error,**self._summary({**s,'status':status,'error':error})}
         g.add_node('qc',self._qc_preflight);g.add_node('planner',planner);g.add_node('worker',worker);g.add_node('replan',replan)
         g.add_node('solver',solver)
@@ -194,7 +248,7 @@ class AgentGraphs:
             if s.get('status')=='rejected':return 'solver'
             if s.get('error'):
                 return 'replan' if s.get('replans',0)<self.max_replans else 'solver'
-            return 'solver' if s.get('cursor',0)>=len(s.get('steps',[])) or s.get('iterations',0)>=self.max_steps else 'worker'
+            return 'solver' if self._is_complete(s) or s.get('iterations',0)>=self.max_steps else 'worker'
         g.add_conditional_edges('worker',route_worker,
                                 {'solver':'solver','worker':'worker','replan':'replan'})
         g.add_edge('replan','planner')
@@ -221,50 +275,62 @@ class AgentGraphs:
             last=s['messages'][-1]
             return 'tools' if getattr(last,'tool_calls',None) else 'finish'
         def apply_tools(s):
-            # Exactly ONE tool per node execution. On checkpoint resume, no
-            # earlier side-effecting calls in the same multi-call batch repeat.
+            # One tool per checkpointed node; never lose a failed call in trace.
             calls=[x for x in s['messages'] if isinstance(x,AIMessage) and getattr(x,'tool_calls',None)]
-            if not calls:
-                return {'error':'No pending tool calls','status':'failed'}
-            batch=calls[-1].tool_calls
-            index=s.get('tool_cursor',0)
-            if index >= len(batch):
-                return {'error':'Tool cursor out of range','status':'failed'}
-            call=batch[index]
-            name=call['name'];kwargs=call.get('args',{})
+            if not calls:return {'error':'No pending tool calls','status':'failed'}
+            batch=calls[-1].tool_calls;index=s.get('tool_cursor',0)
+            if index>=len(batch):return {'error':'Tool cursor out of range','status':'failed'}
+            call=batch[index];name=call['name'];kwargs=call.get('args',{})
             evidence=dict(s.get('evidence',{}));trace=list(s.get('trace',[]))
-            latest=s.get('latest_npz')
-            ctx={**s,'evidence':evidence,'latest_npz':latest}
+            latest=s.get('latest_npz');ctx={**s,'evidence':evidence,'latest_npz':latest}
+            step_id=str(call['id']);started=datetime.now(timezone.utc).isoformat();clock=time.perf_counter()
+            attempt_id=f'{step_id}:attempt:{1+sum(t.get("step_id")==step_id for t in trace)}'
+            base={'step':step_id,'step_id':step_id,'attempt_id':attempt_id,'tool':name,'started_at':started}
+            def failed(exc):
+                err=f'{type(exc).__name__}: {exc}'
+                event=finish_trace({**base,'status':'error','error':err},clock)
+                self._progress(name,'failed',step_id=step_id,attempt_id=attempt_id,
+                               duration_ms=event['duration_ms'],error=err)
+                return {'messages':[ToolMessage(content=err[:10000],tool_call_id=step_id,name=name)],
+                        'trace':trace+[event],'evidence':evidence,'latest_npz':latest,
+                        'tool_cursor':index+1,'tool_failures':s.get('tool_failures',0)+1,
+                        'error':err,'status':'failed'}
             try:
-                if len(batch)>3:
-                    raise ValueError('Max 3 tool calls per model turn')
+                if len(batch)>3:raise ValueError('Max 3 tool calls per model turn')
                 args=bind_value(kwargs,ctx)
-            except Exception as exc:
-                text=f'{type(exc).__name__}: {exc}'
-                trace.append({'tool':name,'status':'error','error':text})
-                return {'messages':[ToolMessage(content=text[:10000],tool_call_id=call['id'],name=name)],
-                        'trace':trace,'evidence':evidence,'latest_npz':latest,'tool_cursor':index+1}
-            # Approval is outside try/except: LangGraph uses an exception to pause.
-            approved_args=self._approval(name,args,call['id'])
+                self._guard(name,args,s,step_id)
+            except (ValueError,TypeError,KeyError) as exc:
+                return failed(exc)
+            # LangGraph human approval interrupts MUST propagate unchanged.
+            approved_args=self._approval(name,args,step_id)
             if approved_args is True:approved_args=args
             if approved_args is False:approved_args=None
             if approved_args is None:
-                trace.append({'tool':name,'status':'rejected'})
-                return {'status':'rejected','error':'User denied '+name,'trace':trace,
+                error='User denied '+name
+                event=finish_trace({**base,'status':'rejected','error':error},clock)
+                self._progress(name,'rejected',step_id=step_id,attempt_id=attempt_id,error=error)
+                return {'status':'rejected','error':error,'trace':trace+[event],
                         'tool_cursor':index+1}
             try:
-                self._progress(name,'started')
+                self._progress(name,'started',step_id=step_id,attempt_id=attempt_id)
                 result=self.tools.invoke(name,approved_args)
-                self._progress(name,'completed')
+                if not isinstance(result,dict):raise TypeError('Tool must return a result dictionary')
+                if result.get('status') in ('failed','error','partial_failure'):
+                    raise RuntimeError(f'Tool returned {result["status"]}: '+
+                                       str(result.get('error') or f'{result.get("failed",0)} failed files'))
                 evidence[f'E{len(evidence)+1}']=result
                 if 'output_npz' in result:latest=result['output_npz']
-                trace.append({'tool':name,'status':'ok','result':result})
-                text=str(result)
+                event=finish_trace({**base,'arguments':approved_args,'status':'ok','result':result},clock)
+                self._progress(name,'completed',step_id=step_id,attempt_id=attempt_id,
+                               duration_ms=event['duration_ms'])
+                update={'messages':[ToolMessage(content=str(result)[:10000],tool_call_id=step_id,name=name)],
+                        'trace':trace+[event],'evidence':evidence,'latest_npz':latest,
+                        'tool_cursor':index+1}
+                if name=='assess_eeg_quality' and result.get('status')=='requires_review':
+                    update['qc_summary']=result
+                return update
             except Exception as exc:
-                text=f'{type(exc).__name__}: {exc}'
-                trace.append({'tool':name,'status':'error','error':text})
-            return {'messages':[ToolMessage(content=text[:10000],tool_call_id=call['id'],name=name)],
-                    'trace':trace,'evidence':evidence,'latest_npz':latest,'tool_cursor':index+1}
+                return failed(exc)
         def route_tools(s):
             if s.get('status')=='rejected' or s.get('error'):return 'finish'
             last=next((x for x in reversed(s.get('messages',[]))
@@ -277,8 +343,14 @@ class AgentGraphs:
                 tail=s['messages'][-1]
                 if isinstance(tail,AIMessage) and not tail.tool_calls:
                     answer=str(tail.content)
-            return {'status':'rejected' if s.get('status')=='rejected' else ('failed' if s.get('error') else 'completed'),
-                    'final_answer':answer or (f"Stopped: {s.get('error')}" if s.get('error') else 'No final answer')}
+            failures=s.get('tool_failures',0) or any(t.get('status')=='error' for t in s.get('trace',[]))
+            status=('rejected' if s.get('status')=='rejected' else
+                    'failed' if s.get('error') or (failures and not s.get('evidence')) else
+                    'partial_success' if failures else 'completed')
+            if status in ('failed','partial_success') and not s.get('error'):
+                answer=f'Tool execution failed; inspect trace. '+answer
+            return {'status':status,'final_answer':
+                (f"Stopped: {s.get('error')}" if s.get('error') else answer or 'No final answer')}
         g.add_node('qc',self._qc_preflight);g.add_node('reason',reason);g.add_node('tools',apply_tools);g.add_node('finish',finish)
         g.add_edge(START,'qc');g.add_edge('qc','reason')
         g.add_conditional_edges('reason',route,{'finish':'finish','tools':'tools'})
