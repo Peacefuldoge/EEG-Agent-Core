@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any, Literal
+import re
 from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator, ValidationInfo
 
 class StrictModel(BaseModel):
@@ -143,4 +144,51 @@ class Plan(StrictModel):
             for dep in by_id[sid]:visit(dep)
             visiting.remove(sid);visited.add(sid)
         for sid in names:visit(sid)
+
+        # A planned DAG cannot rely on the execution-order-dependent
+        # $latest_npz mutable pointer. Bind it to precisely one preceding
+        # producer, and validate every local $E*.field data-flow dependency.
+        def refs(obj):
+            if isinstance(obj,str) and obj.startswith('$'):
+                yield obj
+            elif isinstance(obj,dict):
+                for value in obj.values():yield from refs(value)
+            elif isinstance(obj,list):
+                for value in obj:yield from refs(value)
+
+        def replace_latest(obj, producer):
+            if obj=='$latest_npz':return f'${producer}.output_npz'
+            if isinstance(obj,dict):
+                return {key:replace_latest(value,producer) for key,value in obj.items()}
+            if isinstance(obj,list):return [replace_latest(value,producer) for value in obj]
+            return obj
+
+        def ancestors(sid):
+            result=set()
+            def walk(node):
+                for dep in by_id[node]:
+                    if dep not in result:
+                        result.add(dep);walk(dep)
+            walk(sid)
+            return result
+
+        for step in self.steps:
+            upstream=ancestors(step.id)
+            if '$latest_npz' in set(refs(step.args)):
+                producers=[other.id for other in self.steps
+                           if other.id in upstream and other.tool=='preprocess_eeg']
+                if len(producers)!=1:
+                    raise ValueError(
+                        f'{step.id}: $latest_npz needs exactly one dependency-reachable '
+                        'preprocess_eeg producer (found '+str(len(producers))+'); '
+                        'use an explicit $E#.output_npz reference and depends_on')
+                step.args=replace_latest(step.args,producers[0])
+            for ref in refs(step.args):
+                # P2:E1 and P1:E1 are cross-plan qualified references, not
+                # current-plan dependencies; activation checks their evidence.
+                match=re.fullmatch(r'\$((?:P[2-9][0-9]*:)?E[1-9][0-9]*)\.[a-z][a-zA-Z0-9_]*',ref)
+                if match and match.group(1) in ids and match.group(1) not in upstream:
+                    raise ValueError(
+                        f'{step.id}: reference {ref} requires depends_on '
+                        f'path to {match.group(1)}')
         return self

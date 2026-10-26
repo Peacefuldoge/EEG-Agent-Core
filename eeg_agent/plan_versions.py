@@ -63,8 +63,9 @@ def activate_plan(state: dict, steps: list[dict], *, allowed_tools=None) -> dict
                              for dep in ordered_ids if dep in deps]
         transformed.append(step)
     # Validates dependencies and future/self references against the rewritten plan.
-    Plan.model_validate({'steps':transformed},
+    validated=Plan.model_validate({'steps':transformed},
                         context={'allowed_tools':allowed_tools} if allowed_tools is not None else None)
+    transformed=[step.model_dump() for step in validated.steps]
     previous=list(state.get('plan_history',[]))
     previous.append({'plan_id':active,'steps':transformed})
     return {'steps':transformed,'cursor':0,'step_status':{},'error':None,'status':'running',

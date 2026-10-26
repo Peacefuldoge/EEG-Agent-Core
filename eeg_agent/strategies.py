@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Any,Annotated,TypedDict
 from datetime import datetime, timezone
+from pathlib import Path
 import time
 from langgraph.graph import StateGraph,START,END
 from langgraph.graph.message import add_messages
@@ -36,6 +37,9 @@ class WorkflowState(TypedDict,total=False):
     plan_history:list[dict]
     step_status:dict[str,str]
     tool_failures:int
+    task_mode:str  # analysis (default) or chat; only chat can finish without tools
+    required_tools:list[str]  # successful tools required by caller
+    required_artifacts:list[str]  # required keys in successful tool results
 
 class AgentGraphs:
     def __init__(self, model, tools, *, max_steps:int=12, max_replans:int=1, approval_tools=None):
@@ -158,6 +162,8 @@ class AgentGraphs:
         return outcome
 
     def _qc_preflight(self,s):
+        if s.get('task_mode')=='chat':
+            return {'qc_summary':{'status':'not_applicable'}}
         try:
             qc=self.tools.invoke('assess_eeg_quality',{'source':s['input_path'],'max_windows':16,'max_raw_seconds':20})
             return {'qc_summary':qc}
@@ -177,6 +183,42 @@ class AgentGraphs:
     def _is_complete(s):
         return bool(s.get('steps')) and all(
             step['id'] in s.get('evidence',{}) for step in s.get('steps',[]))
+
+    @staticmethod
+    def _react_completion_error(state):
+        """Validate execution evidence, not the LLM's claimed completion.
+
+        The caller, never the model, owns the optional contract. Analysis is
+        the default for agent runs; simple non-tool chat belongs to session.chat.
+        """
+        if state.get('task_mode','analysis')=='chat':
+            return None
+        successes=[event for event in state.get('trace',[])
+                   if event.get('status')=='ok' and isinstance(event.get('result'),dict)]
+        if not successes:
+            return 'No successful tool execution evidence for this analysis task'
+        performed={event.get('tool') for event in successes}
+        required=set(state.get('required_tools') or ())
+        missing=required-performed
+        if missing:
+            return 'Required tools did not complete successfully: '+', '.join(sorted(missing))
+        required_outputs=set(state.get('required_artifacts') or ())
+        def available_artifact(field):
+            for event in successes:
+                value=event['result'].get(field)
+                if value is None or value=='':
+                    continue
+                # A declared file artifact must exist, not just be mentioned by
+                # the LLM or returned as a dead/stale path by a tool.
+                if field.endswith(('_npz','_json','_csv','_html')):
+                    if not isinstance(value,str) or not Path(value).is_file():
+                        continue
+                return True
+            return False
+        absent={field for field in required_outputs if not available_artifact(field)}
+        if absent:
+            return 'Required output artifacts are missing or invalid: '+', '.join(sorted(absent))
+        return None
 
     def _summary(self,state):
         try:
@@ -263,7 +305,7 @@ class AgentGraphs:
             messages=s.get('messages',[])
             if not messages:
                 messages=[SystemMessage(content=SYSTEM+' The allowed source path is provided in the next message. Call tools, never invent computed values. All sources must be literal paths under the allowed data root or $input / $latest_npz.'),
-                          HumanMessage(content=f"Task: {s['task']}\nInput: {s['input_path']}\nQC preflight: {str(s.get('qc_summary',{}))[:2000]}\nUse $input as the first source, $latest_npz after preprocessing.")]
+                          HumanMessage(content=f"Task: {s['task']}\nInput: {s.get('input_path','(none)')}\nQC preflight: {str(s.get('qc_summary',{}))[:2000]}\nUse $input as the first source, $latest_npz after preprocessing.")]
             try:
                 response=self.model.react(messages,self.tools.openai_schemas())
             except Exception as exc:
@@ -344,13 +386,15 @@ class AgentGraphs:
                 if isinstance(tail,AIMessage) and not tail.tool_calls:
                     answer=str(tail.content)
             failures=s.get('tool_failures',0) or any(t.get('status')=='error' for t in s.get('trace',[]))
+            incomplete=self._react_completion_error(s) if not s.get('error') and s.get('status')!='rejected' else None
+            error=s.get('error') or incomplete
             status=('rejected' if s.get('status')=='rejected' else
-                    'failed' if s.get('error') or (failures and not s.get('evidence')) else
+                    'failed' if error or (failures and not s.get('evidence')) else
                     'partial_success' if failures else 'completed')
-            if status in ('failed','partial_success') and not s.get('error'):
-                answer=f'Tool execution failed; inspect trace. '+answer
-            return {'status':status,'final_answer':
-                (f"Stopped: {s.get('error')}" if s.get('error') else answer or 'No final answer')}
+            if status=='partial_success' and not error:
+                answer='Some tool calls failed; inspect trace. '+answer
+            return {'status':status,'error':error,'final_answer':
+                (f'Stopped: {error}' if error else answer or 'No final answer')}
         g.add_node('qc',self._qc_preflight);g.add_node('reason',reason);g.add_node('tools',apply_tools);g.add_node('finish',finish)
         g.add_edge(START,'qc');g.add_edge('qc','reason')
         g.add_conditional_edges('reason',route,{'finish':'finish','tools':'tools'})

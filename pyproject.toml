@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eeg-agent-core"
-version = "0.4.2"
+version = "0.4.3"
 description = "Reusable EEG scientific tools and optional LangGraph ReAct, Plan-Execute, ReWOO adapters; no UI or vLLM dependency"
 readme = "README.md"
 license = "MIT"

@@ -12,7 +12,7 @@ SYSTEM = ('You are an EEG research workflow orchestrator. Do not diagnose diseas
           'Prefer inspect_eeg, preprocess_eeg, analyze_spectrum, '
           'assess_eeg_quality, propose_preprocessing, validate_eeg, batch_preprocess, compare_eeg_quality, inspect_output_metadata, analyze_connectivity, extract_features, visualize_eeg. '
           'When given an input path use the reference $input. '
-          'After preprocessing, use $latest_npz or $E#.output_npz; extract_features works only on EEG-window NPZ and returns feature NPZ (not EEG). '
+          'Within a planned DAG, use $E#.output_npz and depends_on; use $latest_npz only for sequential ReAct; extract_features works only on EEG-window NPZ and returns feature NPZ (not EEG). '
           'If data is already a preprocessed 3D NPZ, skip preprocessing. '
           'Ask for human review when interpolation or ICA assumptions are unclear.')
 
@@ -50,7 +50,7 @@ class QwenModel:
         from langchain_core.messages import SystemMessage,HumanMessage
         catalog=[{'tool':s.name,'purpose':s.description,'input_schema':s.args.model_json_schema()}
                  for s in tools.registry.values()]
-        extra='ReWOO: define a dependency DAG with depends_on; later steps can use $E1.output_npz.' if rewoo else 'Plan-and-Execute: list ordered steps, using $latest_npz after preprocessing.'
+        extra='ReWOO: define a dependency DAG with depends_on; later steps can use $E1.output_npz.' if rewoo else 'Plan-and-Execute: include depends_on and explicit $E1.output_npz after preprocessing.'
         if replanning:
             extra+=' Previous attempt failed. Produce a DIFFERENT safe plan; do not repeat the same failed step without changing parameters.'
         prompt={'task':state['task'],'input_file':state['input_path'],
@@ -60,7 +60,7 @@ class QwenModel:
                  'prior_evidence_reuse':'Only explicit $P1:E1.field or $P2:E1.field may reuse a completed step from an older plan; plain $E1.field always refers to a step in the new plan.',
                 'required_response':{'steps':[{'id':'E1','tool':'inspect_eeg','args':{'source':'$input'},'depends_on':[]}]},
                 'instructions':extra+' Output valid JSON only, 1-12 steps. No markdown. '
-                          'Use $input or $latest_npz for sources; only refer to prior $E#.field keys.'}
+                          'Use $input and explicit $E#.output_npz references with depends_on in planned DAGs; do not use ambiguous $latest_npz.'}
         msg=self.chat.invoke([SystemMessage(content=SYSTEM),HumanMessage(content=json.dumps(prompt,ensure_ascii=False,default=str))])
         return parse_plan(extract_json(str(msg.content)), allowed_tools=set(tools.registry))
 

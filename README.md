@@ -1,9 +1,10 @@
 [中文项目说明](README.zh-CN.md) · [中文可视化指南](docs/visualization.zh-CN.md)
 
+> **v0.4.3**: Deterministic DAG reference binding, per-recording batch QC, and evidence-based ReAct completion. See [FIXES_V043.md](FIXES_V043.md).
 > **v0.4.2**: Fix ReAct failure propagation, numeric NPZ units, shared QC gate, dependency-aware DAG scheduling, and tool failure tracing. See [FIXES_V042.md](FIXES_V042.md).
 > **v0.4.1**: Automatic paired pre/post QC reports, standardized output metadata sidecars, and new Agent read-only tools. See [README_QC_METADATA.md](README_QC_METADATA.md).
 
-# EEG-Agent Core v0.4.0
+# EEG-Agent Core v0.4.3
 
 **Current release:** Independent QC Agent Tools, resumable batch preprocessing, six connectivity methods, scientific parameter reviews, QC-aware planning, read-only parallel steps, editable HITL requiring reapproval, dynamic strict tool registration, content-addressed cache, integrity reports and reproducibility manifests. See **[README_V040.md](README_V040.md)**.
 

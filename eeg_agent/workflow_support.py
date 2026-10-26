@@ -18,12 +18,16 @@ def ready_batch(state, tools, cursor=0, *, max_parallel=3, forbidden=()):
     Non-parallel/approval-sensitive tools always run alone.
     """
     del cursor
+    from .schema import Plan
+    # Validate the whole current plan before scheduling. Plan normalizes
+    # unambiguous legacy $latest_npz references to explicit evidence refs.
+    canonical=Plan.model_validate({'steps':state.get('steps',[])},
+                                  context={'allowed_tools':set(tools.registry)}) if state.get('steps') else None
     registry=set(tools.registry)
     completed=state.get('evidence',{})
     statuses=state.get('step_status',{})
     pending=[]
-    for raw in state.get('steps',[]):
-        step=Step.model_validate(raw,context={'allowed_tools':registry})
+    for step in (canonical.steps if canonical is not None else []):
         if statuses.get(step.id) in ('completed','running','failed','rejected') or step.id in completed:
             continue
         if all(dep in completed and statuses.get(dep) not in ('failed','rejected') for dep in step.depends_on):
@@ -33,8 +37,6 @@ def ready_batch(state, tools, cursor=0, *, max_parallel=3, forbidden=()):
     for step in pending:
         spec=tools.registry[step.tool]
         isolated=not spec.parallel_safe or step.tool in forbidden
-        # Global mutable $latest_npz is order-dependent and never batch-safe.
-        if '$latest_npz' in str(step.args):isolated=True
         if isolated:
             if not batch:return [step]
             continue
