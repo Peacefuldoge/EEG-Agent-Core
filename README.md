@@ -1,120 +1,95 @@
-[中文项目说明](README.zh-CN.md) · [中文可视化指南](docs/visualization.zh-CN.md)
+# EEG-Agent-Core v043 ↔ EEG-Agent-RAG integration bridge
 
-> **v0.4.3**: Deterministic DAG reference binding, per-recording batch QC, and evidence-based ReAct completion. See [FIXES_V043.md](FIXES_V043.md).
-> **v0.4.2**: Fix ReAct failure propagation, numeric NPZ units, shared QC gate, dependency-aware DAG scheduling, and tool failure tracing. See [FIXES_V042.md](FIXES_V042.md).
-> **v0.4.1**: Automatic paired pre/post QC reports, standardized output metadata sidecars, and new Agent read-only tools. See [README_QC_METADATA.md](README_QC_METADATA.md).
+This is an **additive reference integration**, not a GitHub commit/PR or a replacement for existing Core files. Designed after reviewing `Peacefuldoge/EEG-Agent-Core` default branch `v043` (0.4.3) and the EEG-Agent-RAG v0.1.0 FastAPI endpoints.
 
-# EEG-Agent Core v0.4.3
+## Run three independent processes
 
-**Current release:** Independent QC Agent Tools, resumable batch preprocessing, six connectivity methods, scientific parameter reviews, QC-aware planning, read-only parallel steps, editable HITL requiring reapproval, dynamic strict tool registration, content-addressed cache, integrity reports and reproducibility manifests. See **[README_V040.md](README_V040.md)**.
+1. vLLM (port 8000): the single local `qwen3-8b` chat model for both Core and RAG answer generation.
+2. Milvus (port 19530), then RAG API (port 8010); ingest at least one document before asking questions.
+3. EEG-Agent-Core runtime / UI; this bridge is imported and registered in each `EEGSession`.
 
-The scientific package remains independent of Chainlit, CLI, vLLM and downloaded model weights.
-
----
-
-## v0.3.2 additions
-
-See **[README_RUNTIME.md](README_RUNTIME.md)** for streamed events, approvals, checkpoint recovery and Python API.
-
-# EEG-Agent Core · v0.3.1
-
-UI-agnostic EEG scientific tools with **optional** LangGraph execution strategies: Plan-and-Execute, ReAct, ReWOO. This project does **not** install Chainlit, a chat CLI, vLLM, or model weights. It works with the user’s own Python and model setup.
-
-## Installation (Conda + uv, WSL2/Linux)
+For the vLLM uv environment:
 
 ```bash
-conda activate eeg_agent
-uv pip install -e . --python "$CONDA_PREFIX/bin/python"             # EEG tools only
-uv pip install -e ".[agent]" --python "$CONDA_PREFIX/bin/python"   # also LangGraph + plotting
+uv run vllm serve /home/zzz/models/Qwen3-8B \
+ --served-model-name qwen3-8b --host 127.0.0.1 --port 8000 \
+ --enable-auto-tool-choice --tool-call-parser hermes \
+ --reasoning-parser qwen3 --max-model-len 8192 \
+ --gpu-memory-utilization 0.65
 ```
 
-Use the vLLM server in your **other** `vllm` Conda environment; the Agent consumes `http://127.0.0.1:8000/v1` and doesn't install vLLM.
+For the RAG `.env`:
 
-## New: handcrafted features — differential entropy and relative EEG bandpower
+```env
+RAG_LLM_BASE_URL=http://127.0.0.1:8000/v1
+RAG_LLM_MODEL=qwen3-8b
+RAG_LLM_API_KEY=EMPTY
+RAG_EMBEDDING_DEVICE=cpu
+```
 
-The `extract_features` tool exports a `(windows, channels, 34)` matrix with
-raw/band Gaussian differential entropy, delta/theta/alpha/beta/gamma absolute,
-relative and log bandpower, Hjorth, spectral entropy, peak frequency and
-standard temporal features. Relative powers use **1–45 Hz** as denominator.
-It preserves source window/subject/label metadata when available.
+The GPU memory utilization value is only a starting point; adjust based on measured GPU memory, KV cache requirements and reranker placement.
+
+For Core `.env` / process environment:
+
+```env
+EEG_LLM_BASE_URL=http://127.0.0.1:8000/v1
+EEG_LLM_MODEL=qwen3-8b
+EEG_LLM_API_KEY=EMPTY
+EEG_RAG_BASE_URL=http://127.0.0.1:8010
+EEG_RAG_API_KEY=
+```
+
+Use `uv add httpx` in your Core development environment. Keep the three projects in separate virtual environments; no need to install vLLM into Core or RAG environment.
+
+## Integrate in existing EEG-Agent-Core host code
+
+Place `rag_bridge.py` in the Core repo root (or in your application package). When creating **each** `EEGSession`:
 
 ```python
-from eeg_agent import EEGTools, extract_handcrafted_features
+from rag_bridge import RAGClient, register_rag_tool
+from eeg_agent import EEGSession
 
-tools = EEGTools('/mnt/d/EEG', './agent_runs')
-result = tools.invoke('extract_features', {
-    'source': '/mnt/d/EEG/processed/sub01_preprocessed.npz',
-    'max_windows': 128,
-})
-print(result['output_csv'], result['features_npz'])
+rag_client = RAGClient()
+session = EEGSession(data_root='./data', output_root='./outputs', strategy='react')
+register_rag_tool(session, rag_client)
+session.set_file('./data/subject.edf')  # REQUIRED by Core.stream_agent() in v043
+for event in session.stream_agent('Use literature to support EEG QC of this file'):
+    print(event)
 ```
 
-For raw EDF/BDF, call `preprocess_eeg` first. For a NumPy tensor, call
-`extract_handcrafted_features(data, sfreq=250, data_unit='uV')` directly.
-See **[README_FEATURES.md](README_FEATURES.md)** for definitions, custom bands,
-DE units/methods, window-length caveats and full calling examples.
+Your Core already implements validated `EEGTools.register_tool(name, description, args, callback, parallel_safe=...)`. The adapter registers `search_eeg_literature`; Core automatically publishes its JSON schema to vLLM via `QwenModel.react() -> bind_tools()` and executes it via LangGraph, with results recorded in the evidence and trace.
 
-## Use EEG tools without a UI or LLM
+Set up a **different** entry point for literature-only requests (no EEG file):
 
 ```python
-from eeg_agent import EEGTools
-
-tools = EEGTools(data_root='/mnt/d/EEG', output_root='./agent_runs')
-print(tools.invoke('inspect_eeg', {'source': '/mnt/d/EEG/sub01.edf'}))
+print(rag_client.answer('What are suitable EEG QC metrics?')['answer'])
 ```
 
-## Plug into your existing LangGraph code (optional)
+This calls the RAG `/v1/answer` route, which in turn calls **the same** vLLM service. The existing `EEGSession.chat()` method does not use tools; `EEGSession.stream_agent()` currently refuses to start without an EEG file. Do not work around this by creating dummy EEG files.
 
-```python
-from langchain_openai import ChatOpenAI
-from eeg_agent import EEGTools, build_agent
+**Note on model-directed retrieval:** Tool schemas are visible to Qwen3 when using `stream_agent()` and ReAct. The model decides whether to call `search_eeg_literature`. For deterministic always-retrieve behavior, add a host-side policy before planning or require the tool in an explicit graph state `required_tools=['search_eeg_literature']` (requires host API change in v043). A system prompt can encourage tool selection but does not enforce it.
 
-model = ChatOpenAI(model='qwen3-8b', base_url='http://127.0.0.1:8000/v1',
-                   api_key='EMPTY', temperature=0)
-tools = EEGTools('/mnt/d/EEG', './agent_runs')
-graph = build_agent(strategy='rewoo', model=model, tools=tools)
-result = graph.invoke({
-    'task': 'Inspect EEG, calculate PSD, then describe results',
-    'input_path': '/mnt/d/EEG/sub01.edf',
-    'strategy': 'rewoo', 'cursor': 0, 'iterations': 0, 'replans': 0,
-    'steps': [], 'trace': [], 'evidence': {},
-    'latest_npz': None, 'error': None, 'status': 'running',
-}, config={'recursion_limit': 100})
-print(result.get('final_answer'))
+## Test
+
+```
+uv run --no-project --with pytest --with httpx --with pydantic pytest -q tests/test_rag_bridge.py
 ```
 
-For managed execution in an existing app, the stable adapter is also `EEGSession`, which accepts `llm=your_langchain_chat_model`, `strategy='react'`, and `checkpoint=True`. This remains the public integration contract for EEG-Agent-UI 0.3.x.
+The included tests are offline mocked contract checks, **not** live Milvus/vLLM tests. Live smoke test:
 
-## Compatibility and interfaces
-
-- Public: `EEGTools`, `EEGSession`, `STRATEGIES`, `SUPPORTED_RAW`, `build_agent`, `AgentGraphs`.
-- Tools: `inspect_eeg`, `preprocess_eeg`, `analyze_spectrum`, `analyze_connectivity`, `visualize_eeg`, `extract_features`.
-- If plotting isn't installed (`.[viz]` or `.[agent]`), use other tools; plotting needs Matplotlib.
-- Per-run logs and SQLite checkpoints are supported, but complete interactive pause/resume, token streaming and durable chat history are **not yet implemented**.
-- No uploaded EEG is transferred to an external API by this library; users choose their LLM client.
-- The source tree retains original four-dataset preprocessing scripts and older notebooks for research traceability; they are not installed as import dependencies.
-
-## GUI and CLI (separate project)
-
-See `EEG-Agent-UI`: an optional package including Chainlit Web UI and terminal REPL. The core has **no import or install dependency** on this UI.
-
-## Tests
-
-```bash
-python -m pytest -q tests
+```
+curl -fsS http://127.0.0.1:8000/v1/models
+curl -fsS http://127.0.0.1:8010/health
+curl -fsS -X POST http://127.0.0.1:8010/v1/retrieve -H 'Content-Type: application/json' -d '{"query":"EEG quality control", "mode":"hybrid", "top_k":3}'
 ```
 
-Synthetic example inputs live under `examples/demo_npz/`. They are generated data, not clinical samples.
+If RAG_API_KEY configured, include `X-API-Key`. For the agent, use `PYTHONPATH=. uv run python examples/agent_with_rag.py --data-root /absolute/path/data --eeg /absolute/path/data/sub01.edf` from the bridge directory (or set PYTHONPATH appropriately if launched from Core). The Core `[agent]` dependency set must be installed beforehand.
 
-## Benchmark all three strategies (no UI required)
+## Security/limits
 
-```bash
-python scripts/compare_strategies.py \
-  --data-root /mnt/d/EEG --input /mnt/d/EEG/sub01.edf \
-  --task 'Inspect, compute spectral power and explain results' \
-  --output-root ./benchmarks/local_runs
-```
-
-An already-running compatible LLM endpoint is needed. The optional `examples/start_vllm_example.sh` is a user-editable recipe, **not** an install dependency.
-
-Built-in 26/64 and HydroCel electrode layout JSONs are included in the installed Python package. Access with `from eeg_agent import channel_config_path; print(channel_config_path("standard_26"))`.
+- Retrieved snippets are untrusted; do not execute tool directives embedded in papers.
+- Retain DOI/title/page/chunk ID so citations are auditable; do not let Qwen fabricate paper URLs.
+- Scientific EEG operations still go through Core QC / HITL. Retrieval is read-only.
+- `top_k <= 10` and each excerpt is at most 1600 characters, avoiding unbounded prompt growth.
+- vLLM and RAG APIs are bound to localhost; add authentication/network controls before allowing outside access.
+- On checkpoint resume, register the same tool names before restoring the graph.
